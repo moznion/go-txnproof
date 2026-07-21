@@ -1,0 +1,24 @@
+name: tagpr
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tagpr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: Songmu/tagpr@d1b8138b7a31075141b6cd64103de9485ced7ac9 # v1.20.1
+        env:
+          # A PAT (or GitHub App token) rather than the default GITHUB_TOKEN, so
+          # the release PR that tagpr opens is authored by a real token and thus
+          # triggers the `check` workflow's pull_request runs (PRs created with
+          # GITHUB_TOKEN do not trigger other workflows).
+          GITHUB_TOKEN: ${{ secrets.TAGPR_TOKEN }}
