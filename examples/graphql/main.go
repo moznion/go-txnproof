@@ -20,7 +20,7 @@ import (
 	"os"
 
 	"github.com/graphql-go/graphql"
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 // WithBoundary wraps one resolver so it runs inside a txnproof boundary named

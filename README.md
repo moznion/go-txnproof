@@ -36,7 +36,7 @@ import (
 	"database/sql"
 
 	"github.com/jackc/pgx/v4/stdlib"
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 detector := txnproof.New(

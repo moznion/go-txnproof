@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 // Unit is one server-side transaction that contained at least one write.

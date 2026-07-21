@@ -89,7 +89,7 @@ import (
 	"regexp"
 	"strings"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 	"github.com/moznion/go-txnproof/crosscheck"
 )
 

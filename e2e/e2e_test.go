@@ -27,7 +27,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 	"github.com/moznion/go-txnproof/crosscheck"
 	"github.com/moznion/go-txnproof/pgcheck"
 )
