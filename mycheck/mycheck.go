@@ -133,7 +133,7 @@ import (
 	"fmt"
 	"io"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 	"github.com/moznion/go-txnproof/crosscheck"
 )
 

@@ -20,7 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 // TxnProofMiddleware wraps mux so that every request runs inside a txnproof

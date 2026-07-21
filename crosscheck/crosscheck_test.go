@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 func write(txID, sql string, line int) Statement {

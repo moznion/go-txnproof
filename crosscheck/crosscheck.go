@@ -71,7 +71,7 @@ package crosscheck
 import (
 	"io"
 
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 )
 
 // Statement is one SQL statement extracted from a database's server-side

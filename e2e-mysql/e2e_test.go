@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	txnproof "github.com/moznion/go-txnproof"
+	"github.com/moznion/go-txnproof"
 	"github.com/moznion/go-txnproof/crosscheck"
 	"github.com/moznion/go-txnproof/mycheck"
 )
