@@ -1,0 +1,10 @@
+[tagpr]
+	# Branch tagpr watches; a merge to it triggers tagging + release.
+	releaseBranch = main
+	# Source of truth for the version constant, bumped automatically in the
+	# release PR. See version.go.
+	versionFile = version.go
+	# Tags are v-prefixed (v1.2.3) as Go modules expect.
+	vPrefix = true
+	# Create a GitHub Release when the release PR is merged.
+	release = true
