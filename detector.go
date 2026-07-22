@@ -142,10 +142,10 @@ func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...Bound
 			}
 		}
 	}
-	b := &boundary{
-		name:         name,
-		writeTxUnits: map[uint64]struct{}{},
-	}
+	// writeTxUnits is allocated lazily on the first in-transaction write, so a
+	// boundary that only issues auto-commit statements (or none) never pays for
+	// the map.
+	b := &boundary{name: name}
 	if d.attrsFunc != nil {
 		// Evaluated once per boundary, before per-boundary options so that
 		// WithBoundaryAttrs entries come after detector-level ones.
@@ -195,6 +195,9 @@ func (d *Detector) record(ctx context.Context, query string, kind StatementKind,
 	}
 	if kind == KindWrite {
 		if txID != 0 {
+			if b.writeTxUnits == nil {
+				b.writeTxUnits = map[uint64]struct{}{}
+			}
 			b.writeTxUnits[txID] = struct{}{}
 		} else {
 			b.autoCommitWrites++
