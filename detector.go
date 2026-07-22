@@ -108,15 +108,62 @@ type Boundary struct {
 	allowReason string
 	attrs       []BoundaryAttr // immutable after StartBoundary returns
 
-	mu               sync.Mutex
-	statements       []StatementRecord
-	writeTxUnits     map[uint64]struct{} // transactions that contained >=1 write
-	autoCommitWrites int                 // each auto-commit write is its own atomic unit
+	mu         sync.Mutex
+	statements []StatementRecord
+	// Distinct transactions that contained >=1 write. The first
+	// inlineWriteTxCap IDs live inline in writeTxInline (writeTxN counts how
+	// many distinct IDs have been seen in total), so a boundary spanning only a
+	// few transactions tallies its write-units without allocating a map at all;
+	// IDs past the inline capacity spill into writeTxOverflow.
+	writeTxInline    [inlineWriteTxCap]uint64
+	writeTxN         int
+	writeTxOverflow  map[uint64]struct{}
+	autoCommitWrites int // each auto-commit write is its own atomic unit
 	truncated        int
 	finished         bool
 }
 
+// inlineWriteTxCap is how many distinct write-transaction IDs a boundary can
+// track before spilling to a map. Boundaries almost always span a single (or a
+// small handful of) transaction, so a modest inline capacity keeps the common
+// path allocation-free without bloating the struct.
+const inlineWriteTxCap = 4
+
+// initialStatementCap is the capacity given to the statement-record buffer on
+// its first append, chosen to absorb the typical handful of statements in one
+// allocation instead of several slice regrowths (bounded by the per-boundary
+// recording cap).
+const initialStatementCap = 8
+
 var _ context.Context = (*Boundary)(nil)
+
+// noteWriteTx records that txID contained a write, counting each distinct
+// transaction ID once. It must be called with b.mu held.
+func (b *Boundary) noteWriteTx(txID uint64) {
+	inline := b.writeTxN
+	if inline > inlineWriteTxCap {
+		inline = inlineWriteTxCap
+	}
+	for i := 0; i < inline; i++ {
+		if b.writeTxInline[i] == txID {
+			return
+		}
+	}
+	if b.writeTxOverflow != nil {
+		if _, ok := b.writeTxOverflow[txID]; ok {
+			return
+		}
+	}
+	if b.writeTxN < inlineWriteTxCap {
+		b.writeTxInline[b.writeTxN] = txID
+	} else {
+		if b.writeTxOverflow == nil {
+			b.writeTxOverflow = make(map[uint64]struct{})
+		}
+		b.writeTxOverflow[txID] = struct{}{}
+	}
+	b.writeTxN++
+}
 
 func (b *Boundary) Deadline() (time.Time, bool) { return b.parent.Deadline() }
 func (b *Boundary) Done() <-chan struct{}       { return b.parent.Done() }
@@ -220,16 +267,22 @@ func (d *Detector) record(ctx context.Context, query string, kind StatementKind,
 		return
 	}
 	if len(b.statements) < d.maxRecordedStatements {
+		if b.statements == nil {
+			// Size the buffer once for the typical handful of statements
+			// instead of regrowing it a few times; stay under the cap.
+			c := initialStatementCap
+			if c > d.maxRecordedStatements {
+				c = d.maxRecordedStatements
+			}
+			b.statements = make([]StatementRecord, 0, c)
+		}
 		b.statements = append(b.statements, StatementRecord{Query: query, Kind: kind, TxID: txID, Time: time.Now()})
 	} else {
 		b.truncated++
 	}
 	if kind == KindWrite {
 		if txID != 0 {
-			if b.writeTxUnits == nil {
-				b.writeTxUnits = map[uint64]struct{}{}
-			}
-			b.writeTxUnits[txID] = struct{}{}
+			b.noteWriteTx(txID)
 		} else {
 			b.autoCommitWrites++
 		}
@@ -243,7 +296,7 @@ func (d *Detector) finishBoundary(b *Boundary) {
 		return
 	}
 	b.finished = true
-	units := len(b.writeTxUnits) + b.autoCommitWrites
+	units := b.writeTxN + b.autoCommitWrites
 	statements := make([]StatementRecord, len(b.statements))
 	copy(statements, b.statements)
 	truncated := b.truncated

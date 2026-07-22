@@ -37,6 +37,34 @@ func TestTwoAutoCommitWritesIsViolation(t *testing.T) {
 	}
 }
 
+func TestWriteTxUnitCountingInlineAndOverflow(t *testing.T) {
+	// Exercises noteWriteTx across the inline capacity boundary: each distinct
+	// transaction ID counts once, repeats are deduplicated, and IDs beyond the
+	// inline array spill into the overflow map without being lost or doubled.
+	det, cr, _ := setup(t)
+
+	ctx, b := det.StartBoundary(context.Background(), "ManyTx")
+	// 6 distinct write transactions (> inlineWriteTxCap == 4), each recorded
+	// twice to prove dedup, plus one auto-commit write.
+	for tx := uint64(1); tx <= 6; tx++ {
+		det.record(ctx, "INSERT INTO t VALUES (1)", KindWrite, tx)
+		det.record(ctx, "UPDATE t SET a = 1", KindWrite, tx)
+	}
+	det.record(ctx, "INSERT INTO t VALUES (2)", KindWrite, 0)
+	// Reads never count, in a tx or not.
+	det.record(ctx, "SELECT 1", KindRead, 3)
+	b.Finish()
+
+	vs := cr.Violations()
+	if len(vs) != 1 {
+		t.Fatalf("expected 1 violation, got %d", len(vs))
+	}
+	// 6 write transactions + 1 auto-commit write = 7 atomic units.
+	if got := vs[0].WriteUnits; got != 7 {
+		t.Fatalf("WriteUnits = %d, want 7", got)
+	}
+}
+
 func TestSingleWriteIsNotViolation(t *testing.T) {
 	det, cr, db := setup(t)
 
