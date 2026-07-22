@@ -254,7 +254,7 @@ func TestThrottlingReporterEndToEndWithDetector(t *testing.T) {
 
 	violate := func() {
 		ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
-		defer finish()
+		defer finish.Finish()
 		mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
 		mustExec(t, db, ctx, "UPDATE counters SET n = n + 1")
 	}

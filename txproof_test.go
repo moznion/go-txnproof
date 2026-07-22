@@ -23,7 +23,7 @@ func TestTwoAutoCommitWritesIsViolation(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
 	mustExec(t, db, ctx, "UPDATE counters SET n = n + 1")
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 {
@@ -42,7 +42,7 @@ func TestSingleWriteIsNotViolation(t *testing.T) {
 
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("expected no violations, got %+v", vs)
@@ -66,7 +66,7 @@ func TestWritesInsideSingleTxIsNotViolation(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("expected no violations, got %+v", vs)
@@ -88,7 +88,7 @@ func TestTxPlusAutoCommitWriteIsViolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustExec(t, db, ctx, "UPDATE counters SET n = n + 1")
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 || vs[0].WriteUnits != 2 {
@@ -112,7 +112,7 @@ func TestTwoSeparateTxsIsViolation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 || vs[0].WriteUnits != 2 {
@@ -137,7 +137,7 @@ func TestRolledBackTxStillCountsAsUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustExec(t, db, ctx, "INSERT INTO audit (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 1 {
 		t.Fatalf("expected 1 violation, got %+v", vs)
@@ -151,7 +151,7 @@ func TestReadsDoNotCount(t *testing.T) {
 	mustQuery(t, db, ctx, "SELECT * FROM users")
 	mustQuery(t, db, ctx, "SELECT * FROM orders")
 	mustExec(t, db, ctx, "UPDATE users SET last_seen = now()")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("expected no violations, got %+v", vs)
@@ -173,7 +173,7 @@ func TestPreparedStatements(t *testing.T) {
 	if _, err := stmt.ExecContext(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 || vs[0].WriteUnits != 2 {
@@ -190,7 +190,7 @@ func TestAllowlistSuppressesAndTracksUsage(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	mustExec(t, db, ctx, "INSERT INTO b (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("allowlisted boundary should be suppressed, got %+v", vs)
@@ -208,7 +208,7 @@ func TestAllowNonAtomicSuppressesViolation(t *testing.T) {
 		AllowNonAtomic("audit writes are intentionally best-effort (TICKET-123)"))
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	mustExec(t, db, ctx, "INSERT INTO audit (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("allowed boundary should be suppressed, got %+v", vs)
@@ -270,8 +270,8 @@ func TestFinishIsIdempotent(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	mustExec(t, db, ctx, "INSERT INTO b (id) VALUES (1)")
-	finish()
-	finish()
+	finish.Finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 1 {
 		t.Fatalf("expected exactly 1 violation, got %d", len(vs))
@@ -301,7 +301,7 @@ func TestStatementRecordCap(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	}
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 {
@@ -328,7 +328,7 @@ func TestConcurrentWritesInOneBoundary(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 || vs[0].WriteUnits != 8 {
@@ -342,7 +342,7 @@ func TestRequireNoViolations(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	mustExec(t, db, ctx, "INSERT INTO b (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	ft := &fakeT{}
 	cr.RequireNoViolations(ft)
@@ -365,7 +365,7 @@ func TestRequireNoUnboundedWrites(t *testing.T) {
 	// A write inside a boundary must not trip it either.
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
-	finish()
+	finish.Finish()
 	cr.RequireNoUnboundedWrites(ft)
 	if len(ft.errors) != 0 {
 		t.Fatalf("expected no test errors for a bounded write, got %d", len(ft.errors))

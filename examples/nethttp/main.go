@@ -40,8 +40,8 @@ func TxnProofMiddleware(detector *txnproof.Detector, mux *http.ServeMux) http.Ha
 		if pattern == "" {
 			pattern = r.Method + " " + r.URL.Path
 		}
-		ctx, finish := detector.StartBoundary(r.Context(), pattern)
-		defer finish()
+		ctx, b := detector.StartBoundary(r.Context(), pattern)
+		defer b.Finish()
 		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

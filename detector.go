@@ -89,14 +89,18 @@ func (d *Detector) nextTxID() uint64 { return d.txSeq.Add(1) }
 
 type boundaryCtxKey struct{}
 
-// boundary accumulates the statement timeline of one logical execution.
+// Boundary is a live logical boundary (a use case, a request, a job): it
+// accumulates the statement timeline of one execution and is finished by
+// calling Finish. StartBoundary returns it both as the context to propagate
+// and as the handle to finish.
 //
 // It implements context.Context itself so that StartBoundary can return the
 // boundary directly as the context node instead of wrapping it in a separate
 // context.WithValue allocation: the boundary doubles as its own value carrier,
 // exactly as the standard library's *valueCtx stores its parent. parent is the
 // context the boundary was started on.
-type boundary struct {
+type Boundary struct {
+	det    *Detector
 	parent context.Context
 
 	name        string
@@ -112,21 +116,26 @@ type boundary struct {
 	finished         bool
 }
 
-var _ context.Context = (*boundary)(nil)
+var _ context.Context = (*Boundary)(nil)
 
-func (b *boundary) Deadline() (time.Time, bool) { return b.parent.Deadline() }
-func (b *boundary) Done() <-chan struct{}       { return b.parent.Done() }
-func (b *boundary) Err() error                  { return b.parent.Err() }
+func (b *Boundary) Deadline() (time.Time, bool) { return b.parent.Deadline() }
+func (b *Boundary) Done() <-chan struct{}       { return b.parent.Done() }
+func (b *Boundary) Err() error                  { return b.parent.Err() }
 
-func (b *boundary) Value(key any) any {
+func (b *Boundary) Value(key any) any {
 	if key == (boundaryCtxKey{}) {
 		return b
 	}
 	return b.parent.Value(key)
 }
 
+// Finish evaluates the boundary and reports a Violation if its writes span two
+// or more atomic units. Call it exactly when the boundary ends (typically via
+// defer); it is idempotent.
+func (b *Boundary) Finish() { b.det.finishBoundary(b) }
+
 // BoundaryOption configures a single boundary at StartBoundary / InBoundary.
-type BoundaryOption func(*boundary)
+type BoundaryOption func(*Boundary)
 
 // AllowNonAtomic marks the boundary as intentionally non-atomic, suppressing
 // its Violation at the call site — the in-code alternative to a central
@@ -137,7 +146,7 @@ type BoundaryOption func(*boundary)
 // nothing), reporters that implement StaleAllowReporter are notified — the
 // same discipline as unused //nolint directives.
 func AllowNonAtomic(reason string) BoundaryOption {
-	return func(b *boundary) {
+	return func(b *Boundary) {
 		b.allowed = true
 		b.allowReason = reason
 	}
@@ -147,15 +156,16 @@ func AllowNonAtomic(reason string) BoundaryOption {
 // request handler, a job) on the context. Every statement executed through a
 // wrapped driver with the returned context is attributed to this boundary.
 //
-// The returned finish function evaluates the boundary and reports a Violation
-// if its writes span two or more atomic units. Call it exactly when the
-// boundary ends (typically via defer); it is idempotent.
+// It returns the boundary both as the context to propagate and as the *Boundary
+// handle to finish. Call Boundary.Finish exactly when the boundary ends
+// (typically via defer) to evaluate it and report a Violation if its writes
+// span two or more atomic units; Finish is idempotent.
 //
 // Starting a boundary on a context that already carries one shadows the outer
 // boundary for statements executed with the new context (reported when
 // WithNestedBoundaryDetection is on).
-func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...BoundaryOption) (context.Context, func()) {
-	if outer, _ := ctx.Value(boundaryCtxKey{}).(*boundary); outer != nil && d.reportNested {
+func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...BoundaryOption) (context.Context, *Boundary) {
+	if outer, _ := ctx.Value(boundaryCtxKey{}).(*Boundary); outer != nil && d.reportNested {
 		n := NestedBoundary{Outer: outer.name, Inner: name, Time: time.Now()}
 		for _, r := range d.reporters {
 			if nr, ok := r.(NestedBoundaryReporter); ok {
@@ -167,7 +177,7 @@ func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...Bound
 	// boundary that only issues auto-commit statements (or none) never pays for
 	// the map. The boundary is its own context node (see the type doc), so no
 	// separate context.WithValue allocation is made here.
-	b := &boundary{parent: ctx, name: name}
+	b := &Boundary{det: d, parent: ctx, name: name}
 	if d.attrsFunc != nil {
 		// Evaluated once per boundary, before per-boundary options so that
 		// WithBoundaryAttrs entries come after detector-level ones.
@@ -176,19 +186,19 @@ func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...Bound
 	for _, o := range opts {
 		o(b)
 	}
-	return b, func() { d.finishBoundary(b) }
+	return b, b
 }
 
 // InBoundary runs f inside a boundary and finishes it when f returns.
 func (d *Detector) InBoundary(ctx context.Context, name string, f func(context.Context) error, opts ...BoundaryOption) error {
-	ctx, finish := d.StartBoundary(ctx, name, opts...)
-	defer finish()
+	ctx, b := d.StartBoundary(ctx, name, opts...)
+	defer b.Finish()
 	return f(ctx)
 }
 
 // record attributes one executed statement to the boundary in ctx (if any).
 func (d *Detector) record(ctx context.Context, query string, kind StatementKind, txID uint64) {
-	b, _ := ctx.Value(boundaryCtxKey{}).(*boundary)
+	b, _ := ctx.Value(boundaryCtxKey{}).(*Boundary)
 	if b == nil {
 		if kind == KindWrite && d.reportUnbounded {
 			rec := StatementRecord{Query: query, Kind: kind, TxID: txID, Time: time.Now()}
@@ -226,7 +236,7 @@ func (d *Detector) record(ctx context.Context, query string, kind StatementKind,
 	}
 }
 
-func (d *Detector) finishBoundary(b *boundary) {
+func (d *Detector) finishBoundary(b *Boundary) {
 	b.mu.Lock()
 	if b.finished {
 		b.mu.Unlock()
