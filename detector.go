@@ -90,7 +90,15 @@ func (d *Detector) nextTxID() uint64 { return d.txSeq.Add(1) }
 type boundaryCtxKey struct{}
 
 // boundary accumulates the statement timeline of one logical execution.
+//
+// It implements context.Context itself so that StartBoundary can return the
+// boundary directly as the context node instead of wrapping it in a separate
+// context.WithValue allocation: the boundary doubles as its own value carrier,
+// exactly as the standard library's *valueCtx stores its parent. parent is the
+// context the boundary was started on.
 type boundary struct {
+	parent context.Context
+
 	name        string
 	allowed     bool // marked intentionally non-atomic via AllowNonAtomic
 	allowReason string
@@ -102,6 +110,19 @@ type boundary struct {
 	autoCommitWrites int                 // each auto-commit write is its own atomic unit
 	truncated        int
 	finished         bool
+}
+
+var _ context.Context = (*boundary)(nil)
+
+func (b *boundary) Deadline() (time.Time, bool) { return b.parent.Deadline() }
+func (b *boundary) Done() <-chan struct{}       { return b.parent.Done() }
+func (b *boundary) Err() error                  { return b.parent.Err() }
+
+func (b *boundary) Value(key any) any {
+	if key == (boundaryCtxKey{}) {
+		return b
+	}
+	return b.parent.Value(key)
 }
 
 // BoundaryOption configures a single boundary at StartBoundary / InBoundary.
@@ -144,8 +165,9 @@ func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...Bound
 	}
 	// writeTxUnits is allocated lazily on the first in-transaction write, so a
 	// boundary that only issues auto-commit statements (or none) never pays for
-	// the map.
-	b := &boundary{name: name}
+	// the map. The boundary is its own context node (see the type doc), so no
+	// separate context.WithValue allocation is made here.
+	b := &boundary{parent: ctx, name: name}
 	if d.attrsFunc != nil {
 		// Evaluated once per boundary, before per-boundary options so that
 		// WithBoundaryAttrs entries come after detector-level ones.
@@ -154,8 +176,7 @@ func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...Bound
 	for _, o := range opts {
 		o(b)
 	}
-	bctx := context.WithValue(ctx, boundaryCtxKey{}, b)
-	return bctx, func() { d.finishBoundary(bctx, b) }
+	return b, func() { d.finishBoundary(b) }
 }
 
 // InBoundary runs f inside a boundary and finishes it when f returns.
@@ -205,7 +226,7 @@ func (d *Detector) record(ctx context.Context, query string, kind StatementKind,
 	}
 }
 
-func (d *Detector) finishBoundary(ctx context.Context, b *boundary) {
+func (d *Detector) finishBoundary(b *boundary) {
 	b.mu.Lock()
 	if b.finished {
 		b.mu.Unlock()
@@ -223,7 +244,7 @@ func (d *Detector) finishBoundary(ctx context.Context, b *boundary) {
 			sa := StaleAllow{Boundary: b.name, Reason: b.allowReason, WriteUnits: units}
 			for _, r := range d.reporters {
 				if sr, ok := r.(StaleAllowReporter); ok {
-					sr.ReportStaleAllow(ctx, sa)
+					sr.ReportStaleAllow(b, sa)
 				}
 			}
 		}
@@ -243,6 +264,6 @@ func (d *Detector) finishBoundary(ctx context.Context, b *boundary) {
 		Attrs:               b.attrs,
 	}
 	for _, r := range d.reporters {
-		r.Report(ctx, v)
+		r.Report(b, v)
 	}
 }
