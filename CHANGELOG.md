@@ -1,6 +1,8 @@
 # Changelog
 
-## [v0.0.2](https://github.com/moznion/go-txnproof/compare/v0.0.1...v0.0.2) - 2026-07-23
+## [v0.1.0](https://github.com/moznion/go-txnproof/compare/v0.0.1...v0.1.0) - 2026-07-23
+
+### Breaking Change
 
 - Reduce allocations to zero per statement and one per boundary by @moznion in https://github.com/moznion/go-txnproof/pull/4
 
