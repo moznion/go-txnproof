@@ -30,13 +30,13 @@ func SlogAttrs(attrs []BoundaryAttr) []slog.Attr {
 // WithBoundaryAttrs attaches static attrs to a single boundary at
 // StartBoundary / InBoundary — for values the caller already has at hand:
 //
-//	ctx, finish := detector.StartBoundary(ctx, "CreateUser",
+//	ctx, b := detector.StartBoundary(ctx, "CreateUser",
 //		txnproof.WithBoundaryAttrs(txnproof.Attr("user_id", userID)))
 //
 // They are appended after any attrs produced by WithBoundaryAttrsFunc.
 // Duplicate keys are kept in order, never deduplicated.
 func WithBoundaryAttrs(attrs ...BoundaryAttr) BoundaryOption {
-	return func(b *boundary) { b.attrs = append(b.attrs, attrs...) }
+	return func(b *Boundary) { b.attrs = append(b.attrs, attrs...) }
 }
 
 // WithBoundaryAttrsFunc installs a detector-level extractor that derives

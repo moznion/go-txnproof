@@ -26,7 +26,7 @@ func violate(t *testing.T, det *Detector, db *sql.DB, boundary string) {
 	ctx, finish := det.StartBoundary(context.Background(), boundary)
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
 	mustExec(t, db, ctx, "INSERT INTO b (id) VALUES (1)")
-	finish()
+	finish.Finish()
 }
 
 func TestBaselineSuppressesKnownAndPassesNewViolations(t *testing.T) {
@@ -54,7 +54,7 @@ func TestBaselineUnusedEntries(t *testing.T) {
 	// FixedBoundary runs atomically now: its entry suppressed nothing.
 	ctx, finish := det.StartBoundary(context.Background(), "FixedBoundary")
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
-	finish()
+	finish.Finish()
 
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("expected no violations, got %+v", vs)
@@ -173,7 +173,7 @@ func TestBaselineReporterForwardsOptionalInterfaces(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit",
 		AllowNonAtomic("best-effort by design (TICKET-123)"))
 	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
-	finish()
+	finish.Finish()
 	if sa := cr.StaleAllows(); len(sa) != 1 {
 		t.Fatalf("expected 1 stale allow through the wrapper, got %d", len(sa))
 	}

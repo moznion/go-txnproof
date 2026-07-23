@@ -17,7 +17,7 @@ func violateWithOpts(t *testing.T, det *Detector, ctx context.Context, name stri
 	bctx, finish := det.StartBoundary(ctx, name, opts...)
 	mustExec(t, db, bctx, "INSERT INTO users (id) VALUES (1)")
 	mustExec(t, db, bctx, "UPDATE counters SET n = n + 1")
-	finish()
+	finish.Finish()
 }
 
 func TestWithBoundaryAttrsAppearOnViolation(t *testing.T) {
@@ -27,7 +27,7 @@ func TestWithBoundaryAttrsAppearOnViolation(t *testing.T) {
 		WithBoundaryAttrs(Attr("user_id", 42), Attr("plan", "pro")))
 	mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
 	mustExec(t, db, ctx, "UPDATE counters SET n = n + 1")
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 {
@@ -96,7 +96,7 @@ func TestBoundaryAttrsFuncEvaluatedOncePerBoundary(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
 	}
-	finish()
+	finish.Finish()
 
 	if calls != 1 {
 		t.Fatalf("attrs func must run once per boundary, ran %d times", calls)
@@ -112,7 +112,7 @@ func TestViolationWithoutAttrsHasNone(t *testing.T) {
 	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
 	mustExec(t, db, ctx, "INSERT INTO users (id) VALUES (1)")
 	mustExec(t, db, ctx, "UPDATE counters SET n = n + 1")
-	finish()
+	finish.Finish()
 
 	vs := cr.Violations()
 	if len(vs) != 1 {

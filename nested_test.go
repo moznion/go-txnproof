@@ -11,8 +11,8 @@ func TestNestedBoundaryDetectionOffByDefault(t *testing.T) {
 
 	ctx, finishOuter := det.StartBoundary(context.Background(), "Outer")
 	_, finishInner := det.StartBoundary(ctx, "Inner")
-	finishInner()
-	finishOuter()
+	finishInner.Finish()
+	finishOuter.Finish()
 
 	if got := cr.NestedBoundaries(); len(got) != 0 {
 		t.Fatalf("expected no nested-boundary reports without the option, got %+v", got)
@@ -50,7 +50,7 @@ func TestNestedBoundaryNotReportedWithoutNesting(t *testing.T) {
 	det, cr, _ := setup(t, WithNestedBoundaryDetection())
 
 	_, finish := det.StartBoundary(context.Background(), "Solo")
-	finish()
+	finish.Finish()
 
 	if got := cr.NestedBoundaries(); len(got) != 0 {
 		t.Fatalf("expected no reports for a non-nested boundary, got %+v", got)
@@ -68,8 +68,8 @@ func TestRequireNoNestedBoundaries(t *testing.T) {
 
 	ctx, finishOuter := det.StartBoundary(context.Background(), "Outer")
 	_, finishInner := det.StartBoundary(ctx, "Inner")
-	finishInner()
-	finishOuter()
+	finishInner.Finish()
+	finishOuter.Finish()
 
 	cr.RequireNoNestedBoundaries(ft)
 	if len(ft.errors) != 1 {
@@ -85,8 +85,8 @@ func TestThrottlingReporterThrottlesNestedBoundaries(t *testing.T) {
 	nest := func() {
 		ctx, finishOuter := det.StartBoundary(context.Background(), "Outer")
 		_, finishInner := det.StartBoundary(ctx, "Inner")
-		finishInner()
-		finishOuter()
+		finishInner.Finish()
+		finishOuter.Finish()
 	}
 	nest()
 	nest()
@@ -107,8 +107,8 @@ func TestThrottlingReporterNestedNoopOnPlainNext(t *testing.T) {
 	// Must not panic and must not track state for a next that cannot receive it.
 	ctx, finishOuter := det.StartBoundary(context.Background(), "Outer")
 	_, finishInner := det.StartBoundary(ctx, "Inner")
-	finishInner()
-	finishOuter()
+	finishInner.Finish()
+	finishOuter.Finish()
 
 	if n := len(tr.SuppressedNestedBoundaries()); n != 0 {
 		t.Fatalf("expected no tracked state for a plain next reporter, got %d keys", n)
@@ -122,8 +122,8 @@ func TestBaselineReporterForwardsNestedBoundaries(t *testing.T) {
 
 	ctx, finishOuter := det.StartBoundary(context.Background(), "Outer")
 	_, finishInner := det.StartBoundary(ctx, "Inner")
-	finishInner()
-	finishOuter()
+	finishInner.Finish()
+	finishOuter.Finish()
 
 	if got := cr.NestedBoundaries(); len(got) != 1 {
 		t.Fatalf("expected the nesting to pass through BaselineReporter, got %d reports", len(got))

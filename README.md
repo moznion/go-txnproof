@@ -54,8 +54,8 @@ Any `database/sql` driver works (`pgx`, `lib/pq`, `go-sql-driver/mysql`, `mattn/
 A boundary is the unit that *should* be atomic — typically a use case invocation. Put it in middleware so every code path is covered:
 
 ```go
-ctx, finish := detector.StartBoundary(ctx, "CreateUser")
-defer finish()
+ctx, b := detector.StartBoundary(ctx, "CreateUser")
+defer b.Finish()
 
 // ... run the use case with ctx ...
 ```
@@ -68,7 +68,7 @@ err := detector.InBoundary(ctx, "CreateUser", func(ctx context.Context) error {
 })
 ```
 
-Every statement executed with that context (through the wrapped driver) is attributed to the boundary. When `finish` runs, violations are reported.
+Every statement executed with that context (through the wrapped driver) is attributed to the boundary. When `b.Finish()` runs, violations are reported.
 
 ### 3. Testing without a database
 
@@ -141,9 +141,9 @@ Some boundaries are intentionally non-atomic (best-effort audit writes, writes s
 Mark the boundary at its call site — the reason lives next to the code, survives refactors, and shows up in code review diffs:
 
 ```go
-ctx, finish := detector.StartBoundary(ctx, "WriteAuditLog",
+ctx, b := detector.StartBoundary(ctx, "WriteAuditLog",
 	txnproof.AllowNonAtomic("audit writes are best-effort by design (TICKET-123)"))
-defer finish()
+defer b.Finish()
 ```
 
 Rot prevention works per execution: when an allowed boundary finishes with fewer than 2 write units (the allow suppressed nothing), reporters implementing `StaleAllowReporter` (both `CollectingReporter` and `SlogReporter` do) are notified. In tests, assert it:
@@ -288,8 +288,8 @@ func TxnProofMiddleware(detector *txnproof.Detector, mux *http.ServeMux) http.Ha
 		if pattern == "" { // unmatched request (404)
 			pattern = r.Method + " " + r.URL.Path
 		}
-		ctx, finish := detector.StartBoundary(r.Context(), pattern)
-		defer finish()
+		ctx, b := detector.StartBoundary(r.Context(), pattern)
+		defer b.Finish()
 		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -319,9 +319,9 @@ func main() {
 Values the caller already has at hand go on a single boundary with `WithBoundaryAttrs`:
 
 ```go
-ctx, finish := detector.StartBoundary(ctx, "CreateUser",
+ctx, b := detector.StartBoundary(ctx, "CreateUser",
 	txnproof.WithBoundaryAttrs(txnproof.Attr("user_id", userID)))
-defer finish()
+defer b.Finish()
 ```
 
 Both coexist: detector-level attrs come first, then per-boundary ones. Duplicate keys are kept in order, never deduplicated. Reporters built on `log/slog` can convert with `txnproof.SlogAttrs`.
