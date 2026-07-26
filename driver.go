@@ -74,7 +74,13 @@ var (
 // observe records one executed statement, updating textual transaction state
 // (raw "BEGIN"/"COMMIT" executed as statements) as a best effort.
 func (c *wrappedConn) observe(ctx context.Context, query string) {
-	kind := c.det.classify(query)
+	c.observeKind(ctx, query, c.det.classify(query))
+}
+
+// observeKind is observe with the classification already done: the
+// prepared-statement path classifies once at Prepare and reuses the result
+// for every execution.
+func (c *wrappedConn) observeKind(ctx context.Context, query string, kind StatementKind) {
 	switch kind {
 	case KindBegin:
 		if c.txID == 0 {
@@ -91,7 +97,7 @@ func (c *wrappedConn) Prepare(query string) (driver.Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedStmt{conn: c, stmt: stmt, query: query}, nil
+	return &wrappedStmt{conn: c, stmt: stmt, query: query, kind: c.det.classify(query)}, nil
 }
 
 func (c *wrappedConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
@@ -100,7 +106,7 @@ func (c *wrappedConn) PrepareContext(ctx context.Context, query string) (driver.
 		if err != nil {
 			return nil, err
 		}
-		return &wrappedStmt{conn: c, stmt: stmt, query: query}, nil
+		return &wrappedStmt{conn: c, stmt: stmt, query: query, kind: c.det.classify(query)}, nil
 	}
 	return c.Prepare(query)
 }
@@ -236,6 +242,12 @@ type wrappedStmt struct {
 	conn  *wrappedConn
 	stmt  driver.Stmt
 	query string
+	// kind is classified once at Prepare and reused for every execution, so
+	// a reused prepared statement does not re-pay classification (a
+	// data-modifying CTE costs a full-text token scan). The classifier is
+	// fixed after Detector construction and driver.Stmt is used by a single
+	// goroutine, so no locking is needed.
+	kind StatementKind
 }
 
 var (
@@ -253,7 +265,7 @@ func (s *wrappedStmt) Exec(args []driver.Value) (driver.Result, error) {
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observe(context.Background(), s.query)
+	s.conn.observeKind(context.Background(), s.query, s.kind)
 	return res, err
 }
 
@@ -262,7 +274,7 @@ func (s *wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue)
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observe(ctx, s.query)
+	s.conn.observeKind(ctx, s.query, s.kind)
 	return res, err
 }
 
@@ -282,7 +294,7 @@ func (s *wrappedStmt) Query(args []driver.Value) (driver.Rows, error) {
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observe(context.Background(), s.query)
+	s.conn.observeKind(context.Background(), s.query, s.kind)
 	return rows, err
 }
 
@@ -291,7 +303,7 @@ func (s *wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observe(ctx, s.query)
+	s.conn.observeKind(ctx, s.query, s.kind)
 	return rows, err
 }
 

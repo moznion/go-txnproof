@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -206,6 +207,43 @@ func TestPreparedStatements(t *testing.T) {
 	vs := cr.Violations()
 	if len(vs) != 1 || vs[0].WriteUnits != 2 {
 		t.Fatalf("expected 1 violation with 2 units, got %+v", vs)
+	}
+}
+
+// TestPreparedStatementClassifiedOnce pins the prepared-statement fast path:
+// the query is classified once at Prepare, never again per execution — a
+// reused prepared data-modifying CTE would otherwise re-pay a full-text token
+// scan on every execution. The violation assertion proves the executions
+// still went through the wrapped observation path.
+func TestPreparedStatementClassifiedOnce(t *testing.T) {
+	var calls atomic.Int32
+	det, cr, db := setup(t, WithClassifier(func(q string) StatementKind {
+		calls.Add(1)
+		return DefaultClassifier(q)
+	}))
+	// A single connection keeps database/sql from re-preparing the statement
+	// on another pooled connection, which would legitimately classify again.
+	db.SetMaxOpenConns(1)
+
+	ctx, finish := det.StartBoundary(context.Background(), "CreateUser")
+	stmt, err := db.PrepareContext(ctx, "INSERT INTO users (id) VALUES ($1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for i := 0; i < 3; i++ {
+		if _, err := stmt.ExecContext(ctx, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish.Finish()
+
+	vs := cr.Violations()
+	if len(vs) != 1 || vs[0].WriteUnits != 3 {
+		t.Fatalf("expected 1 violation with 3 units, got %+v", vs)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("classifier called %d times for 1 prepare + 3 executions, want 1", got)
 	}
 }
 
