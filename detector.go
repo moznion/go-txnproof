@@ -297,10 +297,13 @@ func (d *Detector) finishBoundary(b *Boundary) {
 	}
 	b.finished = true
 	units := b.writeTxN + b.autoCommitWrites
-	statements := make([]StatementRecord, len(b.statements))
-	copy(statements, b.statements)
-	truncated := b.truncated
 	b.mu.Unlock()
+
+	// After finished is set under the lock, record returns early without ever
+	// touching b.statements / b.truncated again, so both are immutable from here
+	// on and can be read without the lock. Deferring the statement snapshot to
+	// the violation path below means the healthy, non-violating majority of
+	// boundaries never pay for the make+copy at all.
 
 	if units < 2 {
 		if b.allowed {
@@ -319,11 +322,13 @@ func (d *Detector) finishBoundary(b *Boundary) {
 	if d.allowlist != nil && d.allowlist.allow(b.name) {
 		return
 	}
+	statements := make([]StatementRecord, len(b.statements))
+	copy(statements, b.statements)
 	v := Violation{
 		Boundary:            b.name,
 		WriteUnits:          units,
 		Statements:          statements,
-		TruncatedStatements: truncated,
+		TruncatedStatements: b.truncated,
 		Attrs:               b.attrs,
 	}
 	for _, r := range d.reporters {

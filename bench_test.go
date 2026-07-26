@@ -85,6 +85,25 @@ func BenchmarkBoundaryManyTx(b *testing.B) {
 	}
 }
 
+// BenchmarkBoundaryRecordingHealthy measures the default production path:
+// statement recording on (the default cap), one transaction with a couple of
+// writes interleaved with reads, finishing without a violation. The non-violating
+// path must not snapshot the recorded statements.
+func BenchmarkBoundaryRecordingHealthy(b *testing.B) {
+	det := New()
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		bctx, bd := det.StartBoundary(ctx, "Bench")
+		det.record(bctx, "select * from t where id = 1", KindRead, 1)
+		det.record(bctx, "insert into t values (1)", KindWrite, 1)
+		det.record(bctx, "update t set a = 1 where id = 1", KindWrite, 1)
+		det.record(bctx, "select count(*) from t", KindRead, 1)
+		bd.Finish()
+	}
+}
+
 // TestAllocsClassifyIsZero pins statement classification at zero allocations
 // regardless of the query's letter case — the regression guard for the
 // stack-buffer uppercasing on the hot path.
@@ -136,5 +155,23 @@ func TestAllocsBoundarySingleTx(t *testing.T) {
 	})
 	if got > 1 {
 		t.Errorf("single-tx boundary allocated %v times, want <= 1", got)
+	}
+}
+
+// TestAllocsBoundaryRecordingHealthyNoSnapshot guards the healthy default path:
+// with recording on, a boundary that finishes without a violation must allocate
+// only the Boundary struct and the statement buffer (2), never the extra
+// statement snapshot — that snapshot is deferred to the violation path.
+func TestAllocsBoundaryRecordingHealthyNoSnapshot(t *testing.T) {
+	det := New()
+	ctx := context.Background()
+	got := testing.AllocsPerRun(200, func() {
+		bctx, b := det.StartBoundary(ctx, "Bench")
+		det.record(bctx, "insert into t values (1)", KindWrite, 1)
+		det.record(bctx, "select 1", KindRead, 1)
+		b.Finish()
+	})
+	if got > 2 {
+		t.Errorf("healthy recording boundary allocated %v times, want <= 2", got)
 	}
 }
