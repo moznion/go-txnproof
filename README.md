@@ -105,7 +105,7 @@ detector := txnproof.New(
 )
 ```
 
-The overhead is per-statement bookkeeping (a classification and a slice append); there is no extra I/O.
+The overhead is per-statement bookkeeping — a classification and a write-unit tally — with no extra I/O, and it is **allocation-free per statement**. See [Performance](#performance).
 
 #### Throttling reports on hot paths
 
@@ -399,6 +399,27 @@ The general query log records every statement of every connection — use it in 
 ## End-to-end self-verification
 
 txnproof verifies itself with both lenses at once: the `e2e/` and `e2e-mysql/` modules (separate Go modules, excluded from the library's zero-dependency surface) run scenarios through a driver wrapped by txnproof against a real PostgreSQL / MySQL and require the client-side verdict and the server-log verdict (`pgcheck` / `mycheck`) to agree — including the tricky paths (rolled-back transactions, textual `BEGIN`/`COMMIT`, savepoints, the prepared-statement path). `e2e/run.sh` and `e2e-mysql/run.sh` spin up a throwaway server (no Docker needed) and run them; CI does the same on every push, across PostgreSQL 16–18.
+
+## Performance
+
+txnproof sits on the statement hot path, so it is built to stay out of the way. Its steady-state cost is **zero allocations per statement** and **one allocation per boundary**.
+
+- **Per statement — 0 allocations.** Classifying a statement and tallying its write-unit both run without touching the heap, regardless of the SQL's letter case (the classifier uppercases the leading keyword into a stack buffer rather than via `strings.ToUpper`). There is no extra I/O; the underlying driver does the same work it always did.
+- **Per boundary — 1 allocation.** The `Boundary` struct is the only unavoidable allocation. It is returned as a `context.Context` and mutated from driver goroutines through `ctx.Value`, so it provably escapes to the heap — a structural floor, not an oversight. Reaching zero would require `sync.Pool` recycling, which is deliberately avoided: a context can outlive `Finish` (e.g. a goroutine that captured it and runs a query afterward), and a recycled boundary would then be mutated on behalf of a stale context — cross-boundary contamination, unacceptable for a correctness tool.
+- **Opt-in / rare paths cost more, by design.** The statement-record buffer for violation reports is allocated lazily on first use and bounded by `WithMaxRecordedStatements`; a boundary that spans more than four distinct write transactions spills its write-tx set into a small map. Neither is on the common, healthy path.
+
+Measured on an Apple M4 Pro (`go test -bench . -benchmem`):
+
+| Path | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| Classify `INSERT` (lowercase) | 10 | 0 | 0 |
+| Classify data-modifying CTE (`WITH … DELETE … INSERT`) | 41 | 0 | 0 |
+| Classify `SELECT` | 10 | 0 | 0 |
+| Empty boundary (start + finish) | 30 | 192 | 1 |
+| Boundary, 1 tx, 2 writes (healthy path) | 43 | 192 | 1 |
+| Boundary, 8 distinct write txs (overflow) | 165 | 384 | 3 |
+
+These numbers are not just documented but **enforced**: `bench_test.go` includes `testing.AllocsPerRun` guards (run by the normal `go test`) that fail if classification stops being allocation-free or a boundary starts allocating more than once, so a regression breaks CI rather than silently costing GC work in production.
 
 ## Semantics and limitations
 
