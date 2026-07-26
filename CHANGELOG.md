@@ -1,5 +1,13 @@
 # Changelog
 
+## [v0.1.1](https://github.com/moznion/go-txnproof/compare/v0.1.0...v0.1.1) - 2026-07-26
+
+- Add allocation benchmarks, regression guards, and a Performance section by @moznion in https://github.com/moznion/go-txnproof/pull/6
+- Snapshot recorded statements only when reporting a violation by @moznion in https://github.com/moznion/go-txnproof/pull/8
+- Reduce hot-path overheads: bounded throttle-key derivation and conditional outer-boundary lookup by @moznion in https://github.com/moznion/go-txnproof/pull/9
+- Classify prepared statements once at Prepare instead of per execution by @moznion in https://github.com/moznion/go-txnproof/pull/10
+- Add fuzzing for the parsers, the classifier and the detector by @moznion in https://github.com/moznion/go-txnproof/pull/11
+
 ## [v0.1.0](https://github.com/moznion/go-txnproof/compare/v0.0.1...v0.1.0) - 2026-07-23
 
 ### Breaking Change
