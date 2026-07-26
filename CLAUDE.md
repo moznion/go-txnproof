@@ -66,6 +66,12 @@ These prevent double-counting; keep them intact when touching `driver.go`:
   goroutine per driver.Conn); the boundary struct is the shared/locked one.
 - Textual `BEGIN`/`COMMIT`/`ROLLBACK` executed as plain statements also
   update `txID` (best effort); `ROLLBACK TO SAVEPOINT` must not end the tx.
+- `wrappedStmt` classifies its query once at Prepare and caches the
+  `StatementKind`; executions go through `observeKind` with the cached value
+  and must never reclassify (statement-caching drivers would re-pay the
+  data-modifying-CTE full-text scan per execution). Lock-free by contract:
+  the classifier is fixed after `New` and `driver.Stmt` is single-goroutine.
+  Classifiers are therefore documented as pure functions of the query text.
 
 ## Classification
 

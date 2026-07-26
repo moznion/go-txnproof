@@ -45,6 +45,9 @@ func WithAllowlist(a *Allowlist) Option {
 }
 
 // WithClassifier replaces DefaultClassifier for statement classification.
+// The classifier must be a pure function of the query text: for statements
+// executed through a prepared statement it is evaluated once at Prepare and
+// the result is reused for every execution.
 func WithClassifier(c Classifier) Option {
 	return func(d *Detector) { d.classify = c }
 }
