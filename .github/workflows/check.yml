@@ -28,6 +28,25 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+  fuzz:
+    # A panic in txnproof takes its host application down with it, so the
+    # parsers, the classifier and the detector itself are fuzzed on every
+    # change — not only replayed against the committed corpora (which the
+    # test job above already does).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+      - name: Fuzz
+        run: make fuzz FUZZTIME=15s
+      - name: Show discovered crashers
+        # Failing inputs are written into testdata/fuzz/ and are lost with the
+        # runner; print them so they can be committed as regression seeds.
+        if: failure()
+        run: find . -path '*/testdata/fuzz/*' -type f -print -exec cat {} \;
+
   examples:
     runs-on: ubuntu-latest
     strategy:

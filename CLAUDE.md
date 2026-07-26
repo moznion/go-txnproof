@@ -19,8 +19,9 @@ driver), and production monitoring (pluggable `Reporter`s).
   breaking their builds (this happened once).
 - Minimum Go version: 1.22 (`log/slog` and `atomic.Uint64` are used).
 - Before committing: `gofmt -l .` must be empty, `golangci-lint run ./...`
-  clean, `go test -race -count=1 ./...` green. CI enforces all three on
-  stable/oldstable.
+  clean, `go test -race -count=1 ./...` green (that also replays every fuzz
+  seed corpus). CI enforces all three on stable/oldstable, plus a `make fuzz`
+  sweep (see Fuzzing).
 
 ## Core semantics (deliberate decisions — do not change casually)
 
@@ -180,6 +181,44 @@ driver — package tests run on canned log fixtures only).
   (documented in README limitations). Do not bolt dialect-specific implicit
   commit rules onto `wrappedConn`; mycheck's state machine is the detection
   path for this.
+
+## Fuzzing (`fuzz_test.go`, `fuzz_session_test.go`, `*/fuzz_test.go`)
+
+A panic in txnproof takes its host application down with it — far worse than
+a missed violation — so every surface that consumes text the library does not
+control is fuzzed. `make fuzz` sweeps all targets (`FUZZTIME=30s` each by
+default, `make fuzz FUZZTIME=5m` for a deeper run); CI runs the same sweep at
+15s per target and prints any `testdata/fuzz/` crasher it finds. **A crasher
+found anywhere must be committed as a seed** — that directory is the
+regression corpus, and `go test` replays it.
+
+Targets are written to assert the documented semantics, not just "did not
+panic":
+
+- `FuzzDetectorSession` is the important one: it decodes the fuzz input into a
+  driver program (boundaries, transactions, textual tx control, prepared
+  statements, queries) run against `NewNullDB`, and cross-checks every report
+  against an **independent model** of the counting rules. The model
+  deliberately re-implements the semantics instead of reusing the detector's
+  bookkeeping, so a behavior change surfaces as a mismatch — a mutation test
+  (dropping `writeTxN` from the unit count) confirms it fails. Statement kinds
+  the model assumes are pinned by `TestFuzzStatementKinds`.
+- `FuzzDefaultClassifier`: total, pure (the prepared-statement path caches the
+  kind forever), blind to leading whitespace/comments, and case-insensitive
+  for ASCII input only — Unicode case mapping can fold a non-identifier rune
+  into an ASCII letter (U+0131 → 'I') and legitimately change the verdict.
+- `FuzzUnboundedWriteKey` generalizes the normalize-then-truncate equivalence
+  test that CLAUDE.md's throttle section requires.
+- `FuzzThrottlingReporterAccounting`: forwarded + suppressed == submitted, per
+  signal — the fail-open path past the key cap included.
+- `pgcheck.FuzzParse` pins the `.../0` vxid rejection; `mycheck.FuzzParse`
+  pins "every parsed statement carries a synthesized identity" (so a
+  `MissingTxIDError` can never come out of its parse path), and
+  `mycheck.FuzzThreadGrouping` pins that two threads never share one.
+- Known non-goals asserted as such: a baseline round-trip is only exact for
+  valid UTF-8 boundary names (JSON string encoding is lossy otherwise), and
+  `crosscheck` marker slicing is undefined for labels crafted so one marker
+  literal contains the other's.
 
 ## Examples (`examples/`) and e2e (`e2e/`)
 

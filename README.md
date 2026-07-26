@@ -400,6 +400,12 @@ The general query log records every statement of every connection — use it in 
 
 txnproof verifies itself with both lenses at once: the `e2e/` and `e2e-mysql/` modules (separate Go modules, excluded from the library's zero-dependency surface) run scenarios through a driver wrapped by txnproof against a real PostgreSQL / MySQL and require the client-side verdict and the server-log verdict (`pgcheck` / `mycheck`) to agree — including the tricky paths (rolled-back transactions, textual `BEGIN`/`COMMIT`, savepoints, the prepared-statement path). `e2e/run.sh` and `e2e-mysql/run.sh` spin up a throwaway server (no Docker needed) and run them; CI does the same on every push, across PostgreSQL 16–18.
 
+## Robustness
+
+txnproof runs inside your application's request path as driver middleware, so a panic in it would take the application down with it — a far worse outcome than a missed violation. Every surface that consumes text txnproof does not control is therefore fuzzed on every change: the statement classifier, the throttle's key derivation, the baseline file loader, and the PostgreSQL / MySQL server-log parsers. The detector itself is fuzzed too — generated statement programs (boundaries, transactions, textual `BEGIN`/`COMMIT`, prepared statements) run against the null driver and every report is cross-checked against an independent model of the documented counting rules, so the fuzzer catches wrong verdicts and not just crashes.
+
+Run a sweep yourself with `make fuzz` (or `make fuzz FUZZTIME=5m` for a longer one).
+
 ## Performance
 
 txnproof sits on the statement hot path, so it is built to stay out of the way. Its steady-state cost is **zero allocations per statement** and **one allocation per boundary**.
