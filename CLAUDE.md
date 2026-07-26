@@ -107,7 +107,11 @@ not fixed yet"; allowlist/`AllowNonAtomic` mean "intentional, forever".
   Suppressed counts are cumulative snapshot methods, not callbacks (callbacks
   lose counts for keys that never re-violate). Unbounded writes are keyed by
   normalized statement text with a 1024-key cap that **fails open** (past the
-  cap: forwarded unthrottled — never lose reports, only dedup). Injectable
+  cap: forwarded unthrottled — never lose reports, only dedup). The key
+  derivation is a single pass into a fixed-size buffer whose cost is bounded
+  by the key cap, not the statement length (it runs on every report,
+  suppressed ones included); it must stay byte-identical to
+  normalize-then-truncate — an equivalence test pins this. Injectable
   `now func() time.Time` keeps tests sleep-free.
 - Boundary attrs: `[]BoundaryAttr{Key, Value any}` deliberately not
   `[]slog.Attr` (non-slog reporters need plain pairs; `SlogAttrs` bridges).

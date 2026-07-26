@@ -2,9 +2,10 @@ package txnproof
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -212,10 +213,34 @@ func (r *ThrottlingReporter) snapshot(m map[string]*throttleState) map[string]in
 
 // unboundedWriteKey derives the throttle key for an unbounded write:
 // whitespace-normalized query text, truncated to unboundedWriteKeyLen bytes.
+// The normalization streams into a fixed-size buffer and stops as soon as it
+// is full, so the cost is bounded by the key length, not the query length —
+// this key is computed for every unbounded-write report (suppressed ones
+// included), and multi-kilobyte statements must not pay full-length
+// normalization each time.
 func unboundedWriteKey(query string) string {
-	k := strings.Join(strings.Fields(query), " ")
-	if len(k) > unboundedWriteKeyLen {
-		k = k[:unboundedWriteKeyLen]
+	var buf [unboundedWriteKeyLen]byte
+	n := 0
+	pendingSpace := false
+	for i := 0; i < len(query) && n < len(buf); {
+		r, size := rune(query[i]), 1
+		if r >= utf8.RuneSelf {
+			r, size = utf8.DecodeRuneInString(query[i:])
+		}
+		i += size
+		if unicode.IsSpace(r) {
+			pendingSpace = n > 0
+			continue
+		}
+		if pendingSpace {
+			buf[n] = ' '
+			n++
+			pendingSpace = false
+			if n == len(buf) {
+				break
+			}
+		}
+		n += copy(buf[n:], query[i-size:i])
 	}
-	return k
+	return string(buf[:n])
 }
