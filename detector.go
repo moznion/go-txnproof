@@ -212,11 +212,15 @@ func AllowNonAtomic(reason string) BoundaryOption {
 // boundary for statements executed with the new context (reported when
 // WithNestedBoundaryDetection is on).
 func (d *Detector) StartBoundary(ctx context.Context, name string, opts ...BoundaryOption) (context.Context, *Boundary) {
-	if outer, _ := ctx.Value(boundaryCtxKey{}).(*Boundary); outer != nil && d.reportNested {
-		n := NestedBoundary{Outer: outer.name, Inner: name, Time: time.Now()}
-		for _, r := range d.reporters {
-			if nr, ok := r.(NestedBoundaryReporter); ok {
-				nr.ReportNestedBoundary(ctx, n)
+	// The option check comes first: the outer-boundary lookup walks the whole
+	// context chain, and every boundary start would pay it otherwise.
+	if d.reportNested {
+		if outer, _ := ctx.Value(boundaryCtxKey{}).(*Boundary); outer != nil {
+			n := NestedBoundary{Outer: outer.name, Inner: name, Time: time.Now()}
+			for _, r := range d.reporters {
+				if nr, ok := r.(NestedBoundaryReporter); ok {
+					nr.ReportNestedBoundary(ctx, n)
+				}
 			}
 		}
 	}
