@@ -3,6 +3,7 @@ package txnproof
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -181,6 +182,39 @@ func TestThrottlingReporterUnboundedWriteKeyCapFailsOpen(t *testing.T) {
 	tr.ReportUnboundedWrite(ctx, StatementRecord{Query: "INSERT INTO t VALUES (0)", Kind: KindWrite})
 	if got := len(cr.UnboundedWrites()); got != maxUnboundedWriteKeys+2 {
 		t.Fatalf("expected tracked statement to stay throttled, got %d forwarded", got)
+	}
+}
+
+// TestUnboundedWriteKeyMatchesNormalizeThenTruncate pins the streaming key
+// derivation to its specification: the result must equal whitespace
+// normalization via strings.Fields/Join followed by byte truncation, for any
+// input — including unicode whitespace and a truncation point that splits a
+// multi-byte rune.
+func TestUnboundedWriteKeyMatchesNormalizeThenTruncate(t *testing.T) {
+	reference := func(q string) string {
+		k := strings.Join(strings.Fields(q), " ")
+		if len(k) > unboundedWriteKeyLen {
+			k = k[:unboundedWriteKeyLen]
+		}
+		return k
+	}
+	cases := map[string]string{
+		"empty":                              "",
+		"whitespace only":                    " \t\r\n \v\f ",
+		"already normalized":                 "INSERT INTO t VALUES (1)",
+		"mixed whitespace":                   "  INSERT\t\tINTO t\n VALUES  (1) \n",
+		"unicode whitespace":                 "INSERT　INTO t VALUES (1)",
+		"long single token":                  strings.Repeat("a", 3*unboundedWriteKeyLen),
+		"truncation between tokens":          strings.Repeat("ab ", 2*unboundedWriteKeyLen),
+		"truncation mid-rune":                strings.Repeat("あ", unboundedWriteKeyLen),
+		"trailing whitespace only after cap": strings.Repeat("x", unboundedWriteKeyLen) + "   \n",
+	}
+	for name, q := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got, want := unboundedWriteKey(q), reference(q); got != want {
+				t.Errorf("unboundedWriteKey(%q) = %q, want %q", q, got, want)
+			}
+		})
 	}
 }
 

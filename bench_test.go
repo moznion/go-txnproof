@@ -2,6 +2,7 @@ package txnproof
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -101,6 +102,30 @@ func BenchmarkBoundaryRecordingHealthy(b *testing.B) {
 		det.record(bctx, "update t set a = 1 where id = 1", KindWrite, 1)
 		det.record(bctx, "select count(*) from t", KindRead, 1)
 		bd.Finish()
+	}
+}
+
+// BenchmarkUnboundedWriteKeyLargeStatement measures the throttle-key
+// derivation for a multi-kilobyte statement — the cost every unbounded-write
+// report (suppressed ones included) pays when statements are large.
+func BenchmarkUnboundedWriteKeyLargeStatement(b *testing.B) {
+	q := "insert into t values " + strings.Repeat("(1, 'xxxxxxxxxxxxxxxx'),\n", 400) + "(2, 'y')"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		keySink = unboundedWriteKey(q)
+	}
+}
+
+var keySink string
+
+// TestAllocsUnboundedWriteKeyIsBounded pins the throttle-key derivation at a
+// single allocation (the key string itself) regardless of statement size —
+// the regression guard against reintroducing full-length normalization
+// (strings.Fields + Join) ahead of the truncation.
+func TestAllocsUnboundedWriteKeyIsBounded(t *testing.T) {
+	q := "insert into t values " + strings.Repeat("(1, 'xxxxxxxxxxxxxxxx'),\n", 400) + "(2, 'y')"
+	if got := testing.AllocsPerRun(200, func() { keySink = unboundedWriteKey(q) }); got > 1 {
+		t.Errorf("unboundedWriteKey allocated %v times for a large statement, want <= 1", got)
 	}
 }
 
