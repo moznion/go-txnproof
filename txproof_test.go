@@ -3,6 +3,7 @@ package txnproof
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -520,6 +521,221 @@ func TestAllowNonAtomicExactUnitsCallerSliceIsCopied(t *testing.T) {
 	runWritingBoundary(t, det, db, 2, opt)
 	if vs := cr.Violations(); len(vs) != 0 {
 		t.Fatalf("the allow was created for 2 units, got %+v", vs)
+	}
+}
+
+// runWritingBoundaryMarkedHere runs the given number of auto-commit writes
+// inside an unmarked boundary and marks it with AllowNonAtomicHere from the
+// site of the last write — the in-code alternative to marking at the start.
+func runWritingBoundaryMarkedHere(t *testing.T, det *Detector, db *sql.DB, writes int, reason string, units ...int) {
+	t.Helper()
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
+	if writes == 0 {
+		AllowNonAtomicHere(ctx, reason, units...)
+	}
+	for i := 0; i < writes; i++ {
+		if i == writes-1 {
+			AllowNonAtomicHere(ctx, reason, units...)
+		}
+		mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	}
+	finish.Finish()
+}
+
+func TestAllowNonAtomicHereSuppressesViolation(t *testing.T) {
+	det, cr, db := setup(t)
+
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
+	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	// Marked where the non-atomicity actually is, not where the boundary started.
+	AllowNonAtomicHere(ctx, "audit writes are intentionally best-effort (TICKET-123)")
+	mustExec(t, db, ctx, "INSERT INTO audit (id) VALUES (1)")
+	finish.Finish()
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the mark should suppress the violation, got %+v", vs)
+	}
+	if sa := cr.StaleAllows(); len(sa) != 0 {
+		t.Fatalf("the mark suppressed a violation; must not be stale, got %+v", sa)
+	}
+}
+
+func TestAllowNonAtomicHereDecidesLikeTheOption(t *testing.T) {
+	// The two in-code mechanisms are a choice of where the exemption lives,
+	// never of what it can express: for the same reason and counts they must
+	// produce byte-identical reports.
+	const reason = "audit write plus the domain write, nothing more (TICKET-123)"
+	for _, tc := range []struct {
+		name   string
+		writes int
+		units  []int
+	}{
+		{"unconstrained", 3, nil},
+		{"exact count met", 2, []int{2}},
+		{"exact count exceeded", 3, []int{2}},
+		{"several counts", 3, []int{2, 3}},
+		{"atomic execution is stale, never a violation", 1, []int{2}},
+		{"count below 2 can never match", 2, []int{1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			detOpt, crOpt, dbOpt := setup(t)
+			runWritingBoundary(t, detOpt, dbOpt, tc.writes, AllowNonAtomic(reason, tc.units...))
+
+			detHere, crHere, dbHere := setup(t)
+			runWritingBoundaryMarkedHere(t, detHere, dbHere, tc.writes, reason, tc.units...)
+
+			vOpt, vHere := crOpt.Violations(), crHere.Violations()
+			if len(vOpt) != len(vHere) {
+				t.Fatalf("got %d violation(s) from the mark, want %d as with the option (%+v vs %+v)", len(vHere), len(vOpt), vHere, vOpt)
+			}
+			for i := range vOpt {
+				if vHere[i].WriteUnits != vOpt[i].WriteUnits {
+					t.Errorf("violation WriteUnits = %d, want %d as with the option", vHere[i].WriteUnits, vOpt[i].WriteUnits)
+				}
+				if !slices.Equal(vHere[i].AllowedWriteUnits, vOpt[i].AllowedWriteUnits) {
+					t.Errorf("violation AllowedWriteUnits = %v, want %v as with the option", vHere[i].AllowedWriteUnits, vOpt[i].AllowedWriteUnits)
+				}
+			}
+
+			sOpt, sHere := crOpt.StaleAllows(), crHere.StaleAllows()
+			if len(sOpt) != len(sHere) {
+				t.Fatalf("got %d stale allow(s) from the mark, want %d as with the option (%+v vs %+v)", len(sHere), len(sOpt), sHere, sOpt)
+			}
+			for i := range sOpt {
+				if sHere[i] != sOpt[i] {
+					t.Errorf("stale allow = %+v, want %+v as with the option", sHere[i], sOpt[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAllowNonAtomicHereFallsThroughToAllowlist(t *testing.T) {
+	// Same fall-through as the option: a count the mark does not cover leaves
+	// the central Allowlist to decide.
+	al := NewAllowlist().Add("BestEffortAudit", "audit writes are best-effort (TICKET-123)")
+	det, cr, db := setup(t, WithAllowlist(al))
+
+	runWritingBoundaryMarkedHere(t, det, db, 3, "reviewed for exactly 2 units", 2)
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the allowlist entry should suppress the fallen-through violation, got %+v", vs)
+	}
+	if unused := al.UnusedEntries(); len(unused) != 0 {
+		t.Fatalf("the allowlist entry actually suppressed a violation, got unused %v", unused)
+	}
+}
+
+func TestAllowNonAtomicHereLastMarkWins(t *testing.T) {
+	// A mark at the write site is the more specific claim and replaces one made
+	// at boundary start, counts included.
+	det, cr, db := setup(t)
+
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit",
+		AllowNonAtomic("reviewed for exactly 2 units", 2))
+	for i := 0; i < 3; i++ {
+		mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	}
+	AllowNonAtomicHere(ctx, "the retry path writes a third time (TICKET-123)", 3)
+	finish.Finish()
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the later mark covers 3 units, got %+v", vs)
+	}
+}
+
+func TestAllowNonAtomicHereMarksInnermostBoundary(t *testing.T) {
+	// Consistent with shadowing: the mark lands on the boundary the statements
+	// attribute to, and leaves the outer one untouched.
+	det, cr, db := setup(t)
+
+	outerCtx, outer := det.StartBoundary(context.Background(), "Outer")
+	innerCtx, inner := det.StartBoundary(outerCtx, "Inner")
+	AllowNonAtomicHere(innerCtx, "audit writes are best-effort (TICKET-123)")
+	mustExec(t, db, innerCtx, "INSERT INTO a (id) VALUES (1)")
+	mustExec(t, db, innerCtx, "INSERT INTO audit (id) VALUES (1)")
+	inner.Finish()
+
+	mustExec(t, db, outerCtx, "INSERT INTO b (id) VALUES (1)")
+	mustExec(t, db, outerCtx, "INSERT INTO c (id) VALUES (1)")
+	outer.Finish()
+
+	vs := cr.Violations()
+	if len(vs) != 1 || vs[0].Boundary != "Outer" {
+		t.Fatalf("expected only the outer boundary to violate, got %+v", vs)
+	}
+}
+
+func TestAllowNonAtomicHereWithoutBoundaryIsNoOp(t *testing.T) {
+	det, cr, db := setup(t)
+
+	// No boundary in this context: the mark must do nothing, not panic, and not
+	// leak into the next boundary.
+	AllowNonAtomicHere(context.Background(), "no boundary here")
+
+	runWritingBoundary(t, det, db, 2)
+	if vs := cr.Violations(); len(vs) != 1 {
+		t.Fatalf("expected the unmarked boundary to violate, got %+v", vs)
+	}
+	if sa := cr.StaleAllows(); len(sa) != 0 {
+		t.Fatalf("nothing was marked, got %+v", sa)
+	}
+}
+
+func TestAllowNonAtomicHereAfterFinishIsIgnored(t *testing.T) {
+	det, cr, db := setup(t)
+
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
+	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	mustExec(t, db, ctx, "INSERT INTO audit (id) VALUES (1)")
+	finish.Finish()
+
+	// The boundary is already evaluated and reported; a late mark (e.g. from a
+	// goroutine outliving the request) must not rewrite history.
+	AllowNonAtomicHere(ctx, "too late (TICKET-123)")
+	finish.Finish()
+
+	if vs := cr.Violations(); len(vs) != 1 {
+		t.Fatalf("expected exactly the one violation reported at Finish, got %+v", vs)
+	}
+}
+
+func TestAllowNonAtomicHereCallerSliceIsCopied(t *testing.T) {
+	det, cr, db := setup(t)
+
+	counts := []int{2}
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
+	AllowNonAtomicHere(ctx, "reviewed for exactly 2 units (TICKET-123)", counts...)
+	counts[0] = 3 // must not change what the mark allows
+	mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	mustExec(t, db, ctx, "INSERT INTO audit (id) VALUES (1)")
+	finish.Finish()
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the mark was made for 2 units, got %+v", vs)
+	}
+}
+
+func TestAllowNonAtomicHereConcurrentWithWrites(t *testing.T) {
+	// The mark reaches a live boundary from any goroutine, unlike the option;
+	// run under -race to prove the bookkeeping stays sound.
+	det, cr, db := setup(t)
+
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			AllowNonAtomicHere(ctx, "audit writes are best-effort (TICKET-123)")
+			mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+		}()
+	}
+	wg.Wait()
+	finish.Finish()
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the boundary is marked, got %+v", vs)
 	}
 }
 

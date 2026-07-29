@@ -134,9 +134,9 @@ Memory stays bounded: the boundary-keyed state grows only with the set of bounda
 
 ## Allowing intentional non-atomicity
 
-Some boundaries are intentionally non-atomic (best-effort audit writes, writes spanning two databases that a single transaction cannot cover). There are two ways to suppress them explicitly, both requiring a reason.
+Some boundaries are intentionally non-atomic (best-effort audit writes, writes spanning two databases that a single transaction cannot cover). Suppressing them explicitly always requires a reason; what you choose is *where the exemption lives* — on the boundary, at the write that makes it non-atomic, or in a central list.
 
-### In-code: `AllowNonAtomic`
+### In-code, on the boundary: `AllowNonAtomic`
 
 Mark the boundary at its call site — the reason lives next to the code, survives refactors, and shows up in code review diffs:
 
@@ -171,6 +171,26 @@ reporter.RequireNoStaleAllows(t)
 
 Because a boundary's write count can vary by code path, a stale-allow report in production is a hint, not proof — an allowed boundary may violate on one request and not on the next. In deterministic tests it is exact.
 
+### In-code, at the write site: `AllowNonAtomicHere`
+
+The boundary usually starts far from the code that makes it non-atomic — in a middleware or a use-case entry point, while the reason for the extra write is at the extra write. `AllowNonAtomicHere` marks the boundary in the context from there, so the explanation sits next to the code it explains and stays running code rather than a comment:
+
+```go
+// The audit row is written outside the domain transaction on purpose, so a
+// failing audit sink cannot roll back the business change (TICKET-123).
+txnproof.AllowNonAtomicHere(ctx, "audit write is best-effort (TICKET-123)", 2)
+if _, err := db.ExecContext(ctx, "INSERT INTO audit ..."); err != nil {
+	return err
+}
+```
+
+It is the same mark as the `AllowNonAtomic` option — same reason, same optional exact write-unit counts, same fall-through to the `Allowlist`, same stale-allow rot prevention — only declared elsewhere. Details:
+
+- The mark applies to the **innermost** boundary in `ctx`, consistent with how statements attribute, and the moment it is called does not matter: evaluation happens at `Finish`.
+- The **last mark wins**, replacing an earlier one — including one made by the `AllowNonAtomic` option, so a call site can narrow (or widen) what the boundary declared.
+- With **no boundary in `ctx`**, or after the boundary has finished, it does nothing — just as statements executed outside any boundary are ignored. Missing boundary plumbing is caught by `WithUnboundedWriteDetection`, which reports the write this call precedes.
+- Marking at the write site is usually the more durable of the two against rot: a mark on a conditional path exists only on the executions that reach it, whereas one declared at boundary start is stale on every execution that stays atomic.
+
 ### Central list: `Allowlist`
 
 Alternatively, keep exemptions in one place — convenient for bulk initial adoption on an existing codebase:
@@ -204,7 +224,7 @@ if unused := allowlist.UnusedEntries(); len(unused) > 0 {
 
 An entry constrained to exact counts that stops matching also shows up as unused — together with the `Violation` for the uncovered count. That pair means the boundary changed, so review it (and the count) rather than deleting the entry outright.
 
-The two mechanisms coexist: `AllowNonAtomic` on the boundary wins first, then the `Allowlist` is consulted. A practical migration is to allowlist everything on first adoption, then move the permanent exemptions to in-code `AllowNonAtomic` marks.
+The mechanisms coexist: the in-code mark wins first (whether made by `AllowNonAtomic` or `AllowNonAtomicHere`), then the `Allowlist` is consulted. A practical migration is to allowlist everything on first adoption, then move the permanent exemptions into the code.
 
 ## Baseline / ratchet
 
@@ -468,7 +488,7 @@ These numbers are not just documented but **enforced**: `bench_test.go` includes
 
 Runnable, zero-infrastructure examples (each backed by `NewNullDB`, so `go run .` works with no database) live under [`examples/`](examples/):
 
-- [`examples/nethttp`](examples/nethttp/) — net/http middleware that opens a boundary per request, named after the method and `http.ServeMux` route pattern (e.g. `POST /users`).
+- [`examples/nethttp`](examples/nethttp/) — net/http middleware that opens a boundary per request, named after the method and `http.ServeMux` route pattern (e.g. `POST /users`). Also shows `AllowNonAtomicHere` marking an intentional exemption from inside a handler, where the boundary is started by the middleware.
 - [`examples/graphql`](examples/graphql/) — GraphQL resolver middleware (via [graphql-go](https://github.com/graphql-go/graphql)) that opens a boundary per resolver, named `Mutation.createUser`-style.
 
 ## License

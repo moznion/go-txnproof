@@ -93,6 +93,44 @@ func createOrderAtomic(db *sql.DB) http.HandlerFunc {
 	}
 }
 
+// createSignupIntentionallyNonAtomic is non-atomic on purpose: the signup
+// itself is transactional, but the analytics ping is written separately so a
+// failing analytics table cannot roll back the signup.
+//
+// The boundary was started by the middleware, far from here, so the exemption
+// is marked at the write that causes it with txnproof.AllowNonAtomicHere: the
+// reason sits next to the code it explains, and it is running code rather than
+// a comment — pinned to exactly the 2 write units reviewed, so the exemption
+// cannot silently grow if a third write is added later.
+func createSignupIntentionallyNonAtomic(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = tx.Rollback() }() // no-op after Commit
+		if _, err := tx.ExecContext(ctx, "INSERT INTO signups (email) VALUES ('alice@example.com')"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// The signup is committed; the analytics ping is best-effort by design.
+		txnproof.AllowNonAtomicHere(ctx, "analytics ping is best-effort: it must not roll back a signup (TICKET-123)", 2)
+		if _, err := db.ExecContext(ctx, "INSERT INTO analytics (event) VALUES ('signup')"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = fmt.Fprintln(w, "signup created (non-atomically, on purpose)")
+	}
+}
+
 func main() {
 	// Report violations through slog. Timestamps are stripped only to keep
 	// this example's output stable; in production use your regular logger.
@@ -111,6 +149,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /users", createUserNonAtomic(db))
 	mux.HandleFunc("POST /orders", createOrderAtomic(db))
+	mux.HandleFunc("POST /signups", createSignupIntentionallyNonAtomic(db))
 	handler := TxnProofMiddleware(detector, mux)
 
 	// A real application would run http.ListenAndServe(addr, handler);
@@ -120,6 +159,7 @@ func main() {
 
 	post(server.URL+"/users", "two auto-commit INSERTs -> violation expected")
 	post(server.URL+"/orders", "both INSERTs in one transaction -> clean")
+	post(server.URL+"/signups", "non-atomic on purpose, allowed at the write site -> clean")
 }
 
 func post(url, comment string) {

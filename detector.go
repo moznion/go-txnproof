@@ -106,16 +106,20 @@ type Boundary struct {
 	det    *Detector
 	parent context.Context
 
-	name        string
-	allowed     bool // marked intentionally non-atomic via AllowNonAtomic
-	allowReason string
-	// allowUnits are the exact write-unit counts the allow covers. Empty means
-	// the allow is unconstrained (any violating count is suppressed).
-	allowUnits []int
-	attrs      []BoundaryAttr // immutable after StartBoundary returns
+	name  string
+	attrs []BoundaryAttr // immutable after StartBoundary returns
 
-	mu         sync.Mutex
-	statements []StatementRecord
+	mu sync.Mutex
+	// allowed, allowReason and allowUnits hold the in-code allow mark. The
+	// AllowNonAtomic option sets them before the boundary is shared, but
+	// AllowNonAtomicHere may set them again on a live boundary, which is why
+	// they live under the lock and are read there at Finish. allowUnits are the
+	// exact write-unit counts the allow covers; empty means unconstrained (any
+	// violating count is suppressed).
+	allowed     bool
+	allowReason string
+	allowUnits  []int
+	statements  []StatementRecord
 	// Distinct transactions that contained >=1 write. The first
 	// inlineWriteTxCap IDs live inline in writeTxInline (writeTxN counts how
 	// many distinct IDs have been seen in total), so a boundary spanning only a
@@ -215,16 +219,69 @@ type BoundaryOption func(*Boundary)
 // nothing), reporters that implement StaleAllowReporter are notified — the
 // same discipline as unused //nolint directives. A count the mark does not
 // cover needs no such signal: it surfaces as the Violation itself.
+//
+// AllowNonAtomicHere marks the same thing from the site of the write instead
+// of from the boundary start.
 func AllowNonAtomic(reason string, exactWriteUnits ...int) BoundaryOption {
 	// Copied once here, not per boundary: the returned option may be reused for
 	// several boundaries, and the caller's slice must not be able to change
 	// what an already started boundary allows.
 	units := append([]int(nil), exactWriteUnits...)
 	return func(b *Boundary) {
+		// Options run before StartBoundary returns, i.e. before the boundary
+		// can reach another goroutine, so the mark needs no lock here (unlike
+		// AllowNonAtomicHere, which marks a live boundary).
 		b.allowed = true
 		b.allowReason = reason
 		b.allowUnits = units
 	}
+}
+
+// AllowNonAtomicHere marks the boundary in ctx as intentionally non-atomic,
+// suppressing its Violation exactly like the AllowNonAtomic boundary option:
+// the two differ only in where the exemption lives, never in what it can
+// express. The reason and the optional exactWriteUnits mean the same thing
+// there, down to falling through to the central Allowlist when the boundary
+// finishes with a count the mark does not cover.
+//
+// It exists because a boundary is usually started far away from the code that
+// makes it non-atomic — in a middleware or a use-case entry point, while the
+// reason for the extra write is at the extra write. Marking it there keeps the
+// explanation next to the code it explains, and keeps that explanation running
+// code rather than a comment:
+//
+//	// The audit row is written outside the domain transaction on purpose, so a
+//	// failing audit sink cannot roll back the business change (TICKET-123).
+//	txnproof.AllowNonAtomicHere(ctx, "audit write is best-effort (TICKET-123)", 2)
+//	_, err := db.ExecContext(ctx, "INSERT INTO audit ...")
+//
+// The mark applies to the innermost boundary in ctx, and it does not matter
+// when during the boundary's life it is called: the evaluation happens at
+// Finish. The last mark wins, replacing any earlier one (including one made by
+// the AllowNonAtomic option). Calling it with no boundary in ctx, or after the
+// boundary has finished, does nothing — the same way statements executed
+// outside any boundary are ignored. Missing boundary plumbing is caught by
+// WithUnboundedWriteDetection, which reports the write this call precedes.
+//
+// Rot prevention is unchanged: an allowed boundary that finishes with fewer
+// than 2 write units notifies StaleAllowReporter. Marking at the write site
+// tends to be the more durable of the two, since a mark on a conditional path
+// exists only on the executions that reach it.
+func AllowNonAtomicHere(ctx context.Context, reason string, exactWriteUnits ...int) {
+	b, _ := ctx.Value(boundaryCtxKey{}).(*Boundary)
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.finished {
+		return
+	}
+	b.allowed = true
+	b.allowReason = reason
+	// Copied for the same reason as in AllowNonAtomic: the caller keeps the
+	// backing array when the counts are passed as a slice.
+	b.allowUnits = append([]int(nil), exactWriteUnits...)
 }
 
 // coversWriteUnits reports whether an allow constrained to the given exact
@@ -347,6 +404,10 @@ func (d *Detector) finishBoundary(b *Boundary) {
 	}
 	b.finished = true
 	units := b.writeTxN + b.autoCommitWrites
+	// Snapshot the allow mark here: AllowNonAtomicHere can set it from any
+	// goroutine up to this point, and setting finished above is what makes it
+	// stop changing.
+	allowed, allowReason, allowUnits := b.allowed, b.allowReason, b.allowUnits
 	b.mu.Unlock()
 
 	// After finished is set under the lock, record returns early without ever
@@ -356,8 +417,8 @@ func (d *Detector) finishBoundary(b *Boundary) {
 	// boundaries never pay for the make+copy at all.
 
 	if units < 2 {
-		if b.allowed {
-			sa := StaleAllow{Boundary: b.name, Reason: b.allowReason, WriteUnits: units}
+		if allowed {
+			sa := StaleAllow{Boundary: b.name, Reason: allowReason, WriteUnits: units}
 			for _, r := range d.reporters {
 				if sr, ok := r.(StaleAllowReporter); ok {
 					sr.ReportStaleAllow(b, sa)
@@ -372,11 +433,11 @@ func (d *Detector) finishBoundary(b *Boundary) {
 	// gets its say). The declined counts travel with the Violation so the
 	// report can say that a mark exists and why it did not apply.
 	var declinedUnits []int
-	if b.allowed {
-		if coversWriteUnits(b.allowUnits, units) {
+	if allowed {
+		if coversWriteUnits(allowUnits, units) {
 			return
 		}
-		declinedUnits = b.allowUnits
+		declinedUnits = allowUnits
 	}
 	if d.allowlist != nil {
 		allowed, declined := d.allowlist.allow(b.name, units)
