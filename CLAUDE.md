@@ -51,6 +51,34 @@ driver), and production monitoring (pluggable `Reporter`s).
   `UnboundedWriteReporter`). Per-execution stale reports are inherently
   noisy in production (write count varies by code path); exact in
   deterministic tests via `RequireNoStaleAllows`.
+- **Optional exact write-unit counts** narrow either allow mechanism
+  (`AllowNonAtomic(reason, 2)` and `Allowlist.Add(name, reason, 2)`; several
+  counts for boundaries whose count varies by code path). Both share
+  `coversWriteUnits` so they decide identically — the two mechanisms must
+  stay a choice of *where the exemption lives*, never of what it can
+  express, so anything added to one belongs on the other. An uncovered count
+  falls through as if unmarked (the in-code mark falls through to the
+  Allowlist) and is reported as a Violation carrying
+  `AllowedWriteUnits` (the declined counts — in-code mark first, else the
+  Allowlist entry's), which is why no extra stale signal is emitted for it:
+  the Violation itself explains that a mark exists and why it did not apply.
+  A Violation is never emitted for an atomic execution (units <2) just
+  because the declared count differs — `Violation` must keep meaning
+  "not atomic", which everything from `RequireNoViolations` to the
+  pgcheck/mycheck server-log agreement depends on; that case goes out
+  through StaleAllow / `UnusedEntries()` instead. The unit is `Violation.WriteUnits`
+  (transactions-that-wrote + auto-commit writes), not transactions; counts
+  <2 can never match and are documented as permanently stale/unused rather
+  than rejected (no panic; the existing rot channels surface them).
+  `StaleAllow` deliberately does NOT carry the expected counts: adding a
+  slice field would make the struct non-comparable (tests, including the
+  fuzz model, compare it with `==`).
+- An Allowlist entry pinned to counts that stops matching is reported by
+  BOTH `UnusedEntries()` and a Violation. That is accepted: `used` keeps its
+  narrow meaning ("actually suppressed a violation"), and the pair is
+  documented as "review the boundary", not "delete the entry". A separate
+  mismatched-entries API was considered and rejected — the Violation is the
+  signal, as on the in-code path.
 - **Statement recording cap (`WithMaxRecordedStatements`) truncates only the
   report payload, never the unit counting.**
 

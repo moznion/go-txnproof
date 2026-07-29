@@ -36,6 +36,14 @@ func TestTwoAutoCommitWritesIsViolation(t *testing.T) {
 	if !strings.Contains(vs[0].String(), "auto-commit") {
 		t.Errorf("String() should mention auto-commit: %s", vs[0].String())
 	}
+	// Nothing allowed this boundary, so the report carries no declined counts
+	// and must not mention any.
+	if got := vs[0].AllowedWriteUnits; got != nil {
+		t.Errorf("AllowedWriteUnits = %v for an unmarked boundary, want nil", got)
+	}
+	if strings.Contains(vs[0].String(), "allowed for") {
+		t.Errorf("String() should not mention an allow: %s", vs[0].String())
+	}
 }
 
 func TestWriteTxUnitCountingInlineAndOverflow(t *testing.T) {
@@ -267,6 +275,65 @@ func TestAllowlistSuppressesAndTracksUsage(t *testing.T) {
 	}
 }
 
+func TestAllowlistExactUnitsSuppressesOnlyThatCount(t *testing.T) {
+	// The central list decides exactly like an in-code AllowNonAtomic mark with
+	// the same counts: a covered count is suppressed, any other one is an
+	// unreviewed violation — and leaves the entry unused, so CI notices too.
+	t.Run("matching count is suppressed", func(t *testing.T) {
+		al := NewAllowlist().Add("BestEffortAudit", "domain write plus audit write (TICKET-123)", 2)
+		det, cr, db := setup(t, WithAllowlist(al))
+		runWritingBoundary(t, det, db, 2)
+
+		if vs := cr.Violations(); len(vs) != 0 {
+			t.Fatalf("2 write units are exactly what the entry covers, got %+v", vs)
+		}
+		if unused := al.UnusedEntries(); len(unused) != 0 {
+			t.Fatalf("the entry suppressed a violation, got unused %v", unused)
+		}
+	})
+
+	t.Run("uncovered count violates and leaves the entry unused", func(t *testing.T) {
+		al := NewAllowlist().Add("BestEffortAudit", "domain write plus audit write (TICKET-123)", 2)
+		det, cr, db := setup(t, WithAllowlist(al))
+		runWritingBoundary(t, det, db, 3)
+
+		vs := cr.Violations()
+		if len(vs) != 1 || vs[0].Boundary != "BestEffortAudit" || vs[0].WriteUnits != 3 {
+			t.Fatalf("a count outside the entry must be reported, got %+v", vs)
+		}
+		if got := vs[0].AllowedWriteUnits; len(got) != 1 || got[0] != 2 {
+			t.Fatalf("AllowedWriteUnits = %v, want [2] (the entry's counts)", got)
+		}
+		unused := al.UnusedEntries()
+		if len(unused) != 1 || unused[0] != "BestEffortAudit" {
+			t.Fatalf("an entry that suppressed nothing must show up as unused, got %v", unused)
+		}
+	})
+
+	t.Run("several counts allow each", func(t *testing.T) {
+		for _, writes := range []int{2, 3} {
+			al := NewAllowlist().Add("BestEffortAudit", "two on the fast path, three on a cache miss", 2, 3)
+			det, cr, db := setup(t, WithAllowlist(al))
+			runWritingBoundary(t, det, db, writes)
+			if vs := cr.Violations(); len(vs) != 0 {
+				t.Fatalf("%d write units are covered by the entry, got %+v", writes, vs)
+			}
+		}
+	})
+
+	t.Run("caller slice is copied", func(t *testing.T) {
+		counts := []int{2}
+		al := NewAllowlist().Add("BestEffortAudit", "reviewed for exactly 2 units", counts...)
+		counts[0] = 3 // must not change what the entry allows
+
+		det, cr, db := setup(t, WithAllowlist(al))
+		runWritingBoundary(t, det, db, 2)
+		if vs := cr.Violations(); len(vs) != 0 {
+			t.Fatalf("the entry was added for 2 units, got %+v", vs)
+		}
+	})
+}
+
 func TestAllowNonAtomicSuppressesViolation(t *testing.T) {
 	det, cr, db := setup(t)
 
@@ -310,6 +377,149 @@ func TestAllowNonAtomicStaleIsReported(t *testing.T) {
 	cr.RequireNoStaleAllows(ft)
 	if len(ft.errors) != 1 {
 		t.Fatalf("expected 1 test error from RequireNoStaleAllows, got %d", len(ft.errors))
+	}
+}
+
+// runWritingBoundary runs the given number of auto-commit writes (one write
+// unit each) inside a boundary carrying opts, and finishes it.
+func runWritingBoundary(t *testing.T, det *Detector, db *sql.DB, writes int, opts ...BoundaryOption) {
+	t.Helper()
+	ctx, finish := det.StartBoundary(context.Background(), "BestEffortAudit", opts...)
+	for i := 0; i < writes; i++ {
+		mustExec(t, db, ctx, "INSERT INTO a (id) VALUES (1)")
+	}
+	finish.Finish()
+}
+
+func TestAllowNonAtomicExactUnitsSuppressesOnlyThatCount(t *testing.T) {
+	const reason = "audit write plus the domain write, nothing more (TICKET-123)"
+
+	t.Run("matching count is suppressed", func(t *testing.T) {
+		det, cr, db := setup(t)
+		runWritingBoundary(t, det, db, 2, AllowNonAtomic(reason, 2))
+
+		if vs := cr.Violations(); len(vs) != 0 {
+			t.Fatalf("2 write units are exactly what the allow covers, got %+v", vs)
+		}
+		if sa := cr.StaleAllows(); len(sa) != 0 {
+			t.Fatalf("the allow suppressed a violation; must not be stale, got %+v", sa)
+		}
+	})
+
+	t.Run("larger count violates", func(t *testing.T) {
+		det, cr, db := setup(t)
+		runWritingBoundary(t, det, db, 3, AllowNonAtomic(reason, 2))
+
+		vs := cr.Violations()
+		if len(vs) != 1 || vs[0].Boundary != "BestEffortAudit" || vs[0].WriteUnits != 3 {
+			t.Fatalf("a count outside the allow must be reported, got %+v", vs)
+		}
+		// The report must say a mark exists and why it did not apply, or it
+		// reads as an ordinary violation of an unmarked boundary.
+		if got := vs[0].AllowedWriteUnits; len(got) != 1 || got[0] != 2 {
+			t.Fatalf("AllowedWriteUnits = %v, want [2]", got)
+		}
+		if s := vs[0].String(); !strings.Contains(s, "allowed for exactly 2 write unit(s)") {
+			t.Errorf("String() should explain the declined allow: %s", s)
+		}
+		if sa := cr.StaleAllows(); len(sa) != 0 {
+			t.Fatalf("the violation is the signal; no stale allow expected, got %+v", sa)
+		}
+	})
+
+	t.Run("smaller violating count violates", func(t *testing.T) {
+		det, cr, db := setup(t)
+		runWritingBoundary(t, det, db, 2, AllowNonAtomic(reason, 3))
+
+		vs := cr.Violations()
+		if len(vs) != 1 || vs[0].WriteUnits != 2 {
+			t.Fatalf("expected 1 violation with 2 units, got %+v", vs)
+		}
+	})
+
+	t.Run("non-violating count is stale, not a violation", func(t *testing.T) {
+		det, cr, db := setup(t)
+		runWritingBoundary(t, det, db, 1, AllowNonAtomic(reason, 3))
+
+		if vs := cr.Violations(); len(vs) != 0 {
+			t.Fatalf("a single write unit is atomic, got %+v", vs)
+		}
+		sa := cr.StaleAllows()
+		if len(sa) != 1 || sa[0].WriteUnits != 1 || sa[0].Reason != reason {
+			t.Fatalf("expected the allow to be reported stale, got %+v", sa)
+		}
+	})
+}
+
+func TestAllowNonAtomicSeveralExactUnitsAllowEach(t *testing.T) {
+	// A boundary whose write count differs per code path can list every
+	// reviewed count; anything else still violates.
+	opt := AllowNonAtomic("two on the fast path, three when the cache misses (TICKET-123)", 2, 3)
+
+	for _, writes := range []int{2, 3} {
+		det, cr, db := setup(t)
+		runWritingBoundary(t, det, db, writes, opt)
+		if vs := cr.Violations(); len(vs) != 0 {
+			t.Fatalf("%d write units are covered by the allow, got %+v", writes, vs)
+		}
+	}
+
+	det, cr, db := setup(t)
+	runWritingBoundary(t, det, db, 4, opt)
+	vs := cr.Violations()
+	if len(vs) != 1 || vs[0].WriteUnits != 4 {
+		t.Fatalf("4 write units are not covered; expected 1 violation, got %+v", vs)
+	}
+	if s := vs[0].String(); !strings.Contains(s, "allowed for exactly 2 or 3 write unit(s)") {
+		t.Errorf("String() should list every allowed count: %s", s)
+	}
+}
+
+func TestAllowNonAtomicExactUnitsFallsThroughToAllowlist(t *testing.T) {
+	// The in-code mark wins first; when its exact count does not cover this
+	// execution, the central Allowlist still gets its say (and is marked used).
+	al := NewAllowlist().Add("BestEffortAudit", "audit writes are best-effort (TICKET-123)")
+	det, cr, db := setup(t, WithAllowlist(al))
+
+	runWritingBoundary(t, det, db, 3, AllowNonAtomic("reviewed for exactly 2 units", 2))
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the allowlist entry should suppress the fallen-through violation, got %+v", vs)
+	}
+	if unused := al.UnusedEntries(); len(unused) != 0 {
+		t.Fatalf("the allowlist entry actually suppressed a violation, got unused %v", unused)
+	}
+}
+
+func TestAllowNonAtomicExactUnitsCountsTransactionsAndAutoCommits(t *testing.T) {
+	// A write unit is a transaction that wrote or an auto-commit write: two
+	// writes sharing one transaction plus one auto-commit write are 2 units.
+	det, cr, _ := setup(t)
+
+	ctx, b := det.StartBoundary(context.Background(), "BestEffortAudit",
+		AllowNonAtomic("one transaction plus the audit write (TICKET-123)", 2))
+	det.record(ctx, "INSERT INTO t VALUES (1)", KindWrite, 1)
+	det.record(ctx, "UPDATE t SET a = 1", KindWrite, 1)
+	det.record(ctx, "INSERT INTO audit VALUES (1)", KindWrite, 0)
+	b.Finish()
+
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("expected the 2 write units to be covered, got %+v", vs)
+	}
+	if sa := cr.StaleAllows(); len(sa) != 0 {
+		t.Fatalf("the allow suppressed a violation; must not be stale, got %+v", sa)
+	}
+}
+
+func TestAllowNonAtomicExactUnitsCallerSliceIsCopied(t *testing.T) {
+	counts := []int{2}
+	opt := AllowNonAtomic("reviewed for exactly 2 units (TICKET-123)", counts...)
+	counts[0] = 3 // must not change what the option allows
+
+	det, cr, db := setup(t)
+	runWritingBoundary(t, det, db, 2, opt)
+	if vs := cr.Violations(); len(vs) != 0 {
+		t.Fatalf("the allow was created for 2 units, got %+v", vs)
 	}
 }
 
