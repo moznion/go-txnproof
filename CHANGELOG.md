@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.2.0](https://github.com/moznion/go-txnproof/compare/v0.1.1...v0.2.0) - 2026-07-29
+
+- Let allows pin the exact write-unit count they cover: supports `txnproof.AllowNonAtomic` and `allowlist.Add` by @moznion in https://github.com/moznion/go-txnproof/pull/12
+- Let boundaries be marked non-atomic from the write that causes it: supports `AllowNonAtomicHere` by @moznion in https://github.com/moznion/go-txnproof/pull/14
+
 ## [v0.1.1](https://github.com/moznion/go-txnproof/compare/v0.1.0...v0.1.1) - 2026-07-26
 
 - Add allocation benchmarks, regression guards, and a Performance section by @moznion in https://github.com/moznion/go-txnproof/pull/6
