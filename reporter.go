@@ -41,6 +41,12 @@ type Violation struct {
 	// TruncatedStatements is how many statements were dropped from
 	// Statements due to the cap.
 	TruncatedStatements int
+	// AllowedWriteUnits are the exact write-unit counts an AllowNonAtomic
+	// mark (or Allowlist entry) covered for this boundary, set only when the
+	// boundary was marked but finished with a count outside them — i.e. this
+	// violation is reported *because* the reviewed count no longer matches.
+	// It is nil for an ordinary, unmarked violation.
+	AllowedWriteUnits []int
 	// Attrs is the contextual metadata attached to the boundary (trace ID,
 	// request ID, ...): the result of WithBoundaryAttrsFunc evaluated at
 	// boundary start, followed by any WithBoundaryAttrs entries. Duplicate
@@ -52,7 +58,13 @@ type Violation struct {
 // statements grouped by atomic unit.
 func (v Violation) String() string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "txnproof: boundary %q is not atomic: writes span %d atomic units:", v.Boundary, v.WriteUnits)
+	fmt.Fprintf(&sb, "txnproof: boundary %q is not atomic: writes span %d atomic units", v.Boundary, v.WriteUnits)
+	if len(v.AllowedWriteUnits) > 0 {
+		// Without this the report reads as a plain violation, leaving the
+		// reader to wonder why the allow at the call site did not apply.
+		fmt.Fprintf(&sb, " (allowed for exactly %s, so this execution is not covered)", formatWriteUnits(v.AllowedWriteUnits))
+	}
+	sb.WriteByte(':')
 	for _, s := range v.Statements {
 		if s.Kind != KindWrite {
 			continue
@@ -66,6 +78,24 @@ func (v Violation) String() string {
 	if v.TruncatedStatements > 0 {
 		fmt.Fprintf(&sb, "\n  (+%d statements truncated)", v.TruncatedStatements)
 	}
+	return sb.String()
+}
+
+// formatWriteUnits renders the write-unit counts an allow covers as
+// "2", "2 or 3", "2, 3 or 5".
+func formatWriteUnits(units []int) string {
+	var sb strings.Builder
+	for i, n := range units {
+		switch {
+		case i == 0:
+		case i == len(units)-1:
+			sb.WriteString(" or ")
+		default:
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(&sb, "%d", n)
+	}
+	sb.WriteString(" write unit(s)")
 	return sb.String()
 }
 
@@ -300,6 +330,9 @@ func (r *SlogReporter) Report(ctx context.Context, v Violation) {
 		slog.String("boundary", v.Boundary),
 		slog.Int("write_units", v.WriteUnits),
 		slog.Any("writes", writes),
+	}
+	if len(v.AllowedWriteUnits) > 0 {
+		args = append(args, slog.Any("allowed_write_units", v.AllowedWriteUnits))
 	}
 	for _, a := range SlogAttrs(v.Attrs) {
 		args = append(args, a)

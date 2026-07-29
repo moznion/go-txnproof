@@ -109,7 +109,10 @@ type Boundary struct {
 	name        string
 	allowed     bool // marked intentionally non-atomic via AllowNonAtomic
 	allowReason string
-	attrs       []BoundaryAttr // immutable after StartBoundary returns
+	// allowUnits are the exact write-unit counts the allow covers. Empty means
+	// the allow is unconstrained (any violating count is suppressed).
+	allowUnits []int
+	attrs      []BoundaryAttr // immutable after StartBoundary returns
 
 	mu         sync.Mutex
 	statements []StatementRecord
@@ -191,15 +194,55 @@ type BoundaryOption func(*Boundary)
 // its Violation at the call site — the in-code alternative to a central
 // Allowlist entry. The reason should say why and reference a ticket.
 //
+// The optional exactWriteUnits pin how much non-atomicity the mark covers: the
+// allow then applies only when the boundary finishes with exactly one of the
+// given write-unit counts, and any other count is reported as a Violation as
+// if the boundary carried no mark at all (the central Allowlist is still
+// consulted afterwards). It keeps a reviewed exemption from silently growing
+// as the boundary accumulates writes:
+//
+//	// exactly the domain write plus the audit write, nothing more
+//	txnproof.AllowNonAtomic("audit writes are best-effort (TICKET-123)", 2)
+//
+// Passing several counts allows each of them, for a boundary whose write count
+// legitimately differs per code path. A write unit is one transaction that
+// contained at least one write, or one auto-commit write — the same number
+// reported as Violation.WriteUnits, not the number of transactions — so counts
+// below 2 can never match a violation and make the mark permanently stale.
+//
 // Rot prevention works per execution instead of per entry: when an allowed
 // boundary finishes with fewer than 2 write units (i.e. the allow suppressed
 // nothing), reporters that implement StaleAllowReporter are notified — the
-// same discipline as unused //nolint directives.
-func AllowNonAtomic(reason string) BoundaryOption {
+// same discipline as unused //nolint directives. A count the mark does not
+// cover needs no such signal: it surfaces as the Violation itself.
+func AllowNonAtomic(reason string, exactWriteUnits ...int) BoundaryOption {
+	// Copied once here, not per boundary: the returned option may be reused for
+	// several boundaries, and the caller's slice must not be able to change
+	// what an already started boundary allows.
+	units := append([]int(nil), exactWriteUnits...)
 	return func(b *Boundary) {
 		b.allowed = true
 		b.allowReason = reason
+		b.allowUnits = units
 	}
+}
+
+// coversWriteUnits reports whether an allow constrained to the given exact
+// write-unit counts applies to a boundary that finished with units of them. No
+// counts means unconstrained: every violating count is covered.
+//
+// Both allow mechanisms share it so that an in-code AllowNonAtomic mark and an
+// Allowlist entry with the same counts decide identically.
+func coversWriteUnits(allowed []int, units int) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, n := range allowed {
+		if n == units {
+			return true
+		}
+	}
+	return false
 }
 
 // StartBoundary marks the beginning of a logical boundary (a use case, a
@@ -323,11 +366,28 @@ func (d *Detector) finishBoundary(b *Boundary) {
 		}
 		return
 	}
+	// An allow constrained to exact write-unit counts falls through when the
+	// boundary finished with a count it does not cover: the violation is
+	// unreviewed, so it is reported like any other (the Allowlist below still
+	// gets its say). The declined counts travel with the Violation so the
+	// report can say that a mark exists and why it did not apply.
+	var declinedUnits []int
 	if b.allowed {
-		return
+		if coversWriteUnits(b.allowUnits, units) {
+			return
+		}
+		declinedUnits = b.allowUnits
 	}
-	if d.allowlist != nil && d.allowlist.allow(b.name) {
-		return
+	if d.allowlist != nil {
+		allowed, declined := d.allowlist.allow(b.name, units)
+		if allowed {
+			return
+		}
+		// The in-code mark is the more specific claim: keep its counts when
+		// both declined.
+		if declinedUnits == nil {
+			declinedUnits = declined
+		}
 	}
 	statements := make([]StatementRecord, len(b.statements))
 	copy(statements, b.statements)
@@ -336,6 +396,7 @@ func (d *Detector) finishBoundary(b *Boundary) {
 		WriteUnits:          units,
 		Statements:          statements,
 		TruncatedStatements: b.truncated,
+		AllowedWriteUnits:   declinedUnits,
 		Attrs:               b.attrs,
 	}
 	for _, r := range d.reporters {

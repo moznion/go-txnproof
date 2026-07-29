@@ -146,6 +146,22 @@ ctx, b := detector.StartBoundary(ctx, "WriteAuditLog",
 defer b.Finish()
 ```
 
+By default the mark allows *any* amount of non-atomicity in that boundary. Pin it to the exact write-unit count you reviewed to keep the exemption from silently growing — a boundary allowed at 2 units that later grows to 3 is an unreviewed violation again, and is reported as one:
+
+```go
+ctx, b := detector.StartBoundary(ctx, "WriteAuditLog",
+	// exactly the domain write plus the audit write, nothing more
+	txnproof.AllowNonAtomic("audit writes are best-effort by design (TICKET-123)", 2))
+defer b.Finish()
+```
+
+Both directions are caught, and both say what happened:
+
+- **more (or fewer) units than declared, still non-atomic** — reported as a `Violation` carrying `AllowedWriteUnits`, so the message reads `writes span 3 atomic units (allowed for exactly 2 write unit(s), so this execution is not covered)` instead of looking like an unmarked boundary.
+- **declared non-atomic but actually atomic** (fewer than 2 units) — no violation, because the execution *was* atomic; it surfaces through the stale-allow channel below, which fails `RequireNoStaleAllows` in tests.
+
+Pass several counts (`AllowNonAtomic(reason, 2, 3)`) when the write count legitimately differs per code path; each listed count is allowed, everything else violates. Note that the number is `Violation.WriteUnits`, not the number of transactions: one transaction that wrote counts 1, and so does each auto-commit write. A count below 2 can never match a violation, so such a mark is stale on every execution (see below). When the count does not match, the boundary is treated as unmarked — the central `Allowlist` is still consulted afterwards. The same optional counts exist on `Allowlist.Add`, and both decide identically.
+
 Rot prevention works per execution: when an allowed boundary finishes with fewer than 2 write units (the allow suppressed nothing), reporters implementing `StaleAllowReporter` (both `CollectingReporter` and `SlogReporter` do) are notified. In tests, assert it:
 
 ```go
@@ -170,6 +186,14 @@ detector := txnproof.New(
 )
 ```
 
+Entries take the same optional exact write-unit counts as `AllowNonAtomic`, with the same meaning — the choice between the two mechanisms stays a question of *where the exemption lives*, never of what it can express:
+
+```go
+allowlist := txnproof.NewAllowlist().
+	// exactly the domain write plus the audit write, nothing more
+	Add("WriteAuditLog", "audit writes are best-effort by design (TICKET-123)", 2)
+```
+
 To keep the list from rotting, every entry tracks whether it actually suppressed a violation. Fail CI when entries go stale — the same discipline as unused `//nolint` directives:
 
 ```go
@@ -177,6 +201,8 @@ if unused := allowlist.UnusedEntries(); len(unused) > 0 {
 	t.Errorf("stale allowlist entries (remove them): %v", unused)
 }
 ```
+
+An entry constrained to exact counts that stops matching also shows up as unused — together with the `Violation` for the uncovered count. That pair means the boundary changed, so review it (and the count) rather than deleting the entry outright.
 
 The two mechanisms coexist: `AllowNonAtomic` on the boundary wins first, then the `Allowlist` is consulted. A practical migration is to allowlist everything on first adoption, then move the permanent exemptions to in-code `AllowNonAtomic` marks.
 

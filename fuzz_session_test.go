@@ -16,6 +16,7 @@ package txnproof
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"testing"
 )
 
@@ -25,6 +26,7 @@ type fuzzOp byte
 const (
 	opStartBoundary fuzzOp = iota
 	opStartAllowedBoundary
+	opStartExactAllowedBoundary
 	opFinishBoundary
 	opExecWrite
 	opExecRead
@@ -68,6 +70,11 @@ var fuzzStmts = map[fuzzOp]fuzzStmt{
 
 var fuzzBoundaryNames = []string{"CreateUser", "SyncOrders", "Job"}
 
+// fuzzExactAllowUnits is the write-unit count opStartExactAllowedBoundary
+// pins its AllowNonAtomic mark to: exactly this many units are suppressed,
+// every other violating count must still be reported.
+var fuzzExactAllowUnits = []int{2}
+
 // TestFuzzStatementKinds guards the fuzz model's assumption that the sample
 // statements classify as intended: a drift here would silently weaken
 // FuzzDetectorSession instead of failing it.
@@ -83,7 +90,8 @@ func FuzzDetectorSession(f *testing.F) {
 	// Seeds spell out the canonical shapes: two auto-commit writes (a
 	// violation), writes inside one transaction (atomic), a rolled-back
 	// transaction plus a write (a violation), textual transaction control, a
-	// prepared write, nested boundaries and an unbounded write.
+	// prepared write, an allow pinned to an exact write-unit count (met and
+	// exceeded), nested boundaries and an unbounded write.
 	for _, seed := range [][]byte{
 		{4, byte(opStartBoundary), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartBoundary), byte(opBeginTx), byte(opExecWrite), byte(opExecWrite), byte(opCommitTx), byte(opFinishBoundary)},
@@ -91,6 +99,8 @@ func FuzzDetectorSession(f *testing.F) {
 		{4, byte(opStartBoundary), byte(opTextBegin), byte(opExecWrite), byte(opRollbackToSavepoint), byte(opExecWrite), byte(opTextCommit), byte(opFinishBoundary)},
 		{4, byte(opStartBoundary), byte(opPrepareExecWrite), byte(opPrepareExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartAllowedBoundary), byte(opExecRead), byte(opFinishBoundary)},
+		{4, byte(opStartExactAllowedBoundary), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
+		{4, byte(opStartExactAllowedBoundary), byte(opExecWrite), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartBoundary), byte(opStartBoundary), byte(opExecWrite), byte(opFinishBoundary), byte(opExecWrite), byte(opFinishBoundary)},
 		{0, byte(opExecWrite), byte(opQueryWrite), byte(opStartBoundary), byte(opExecCTEWrite), byte(opFinishBoundary)},
 	} {
@@ -124,12 +134,30 @@ type modelBoundary struct {
 	ctx        context.Context
 	name       string
 	allowed    bool
+	allowUnits []int               // exact write-unit counts the allow covers; nil = any
 	recorded   int                 // statements of every kind attributed to it
 	writeTx    map[uint64]struct{} // transactions that contained a write
 	autoCommit int                 // auto-commit writes, one unit each
 }
 
 func (m *modelBoundary) units() int { return len(m.writeTx) + m.autoCommit }
+
+// suppresses re-implements the allow semantics: an unconstrained mark
+// suppresses any violation, one pinned to exact counts only those.
+func (m *modelBoundary) suppresses(units int) bool {
+	if !m.allowed {
+		return false
+	}
+	if len(m.allowUnits) == 0 {
+		return true
+	}
+	for _, n := range m.allowUnits {
+		if n == units {
+			return true
+		}
+	}
+	return false
+}
 
 // fuzzSession runs one generated program against a real *sql.DB backed by the
 // null driver, keeping the model state alongside it.
@@ -191,8 +219,12 @@ func (s *fuzzSession) ctx() context.Context {
 
 func (s *fuzzSession) step(op fuzzOp, nameIdx int) {
 	switch op {
-	case opStartBoundary, opStartAllowedBoundary:
-		s.startBoundary(fuzzBoundaryNames[nameIdx], op == opStartAllowedBoundary)
+	case opStartBoundary, opStartAllowedBoundary, opStartExactAllowedBoundary:
+		var allowUnits []int
+		if op == opStartExactAllowedBoundary {
+			allowUnits = fuzzExactAllowUnits
+		}
+		s.startBoundary(fuzzBoundaryNames[nameIdx], op != opStartBoundary, allowUnits)
 	case opFinishBoundary:
 		s.finishBoundary()
 	case opBeginTx:
@@ -212,19 +244,20 @@ func (s *fuzzSession) step(op fuzzOp, nameIdx int) {
 	}
 }
 
-func (s *fuzzSession) startBoundary(name string, allowed bool) {
+func (s *fuzzSession) startBoundary(name string, allowed bool, allowUnits []int) {
 	var opts []BoundaryOption
 	if allowed {
-		opts = append(opts, AllowNonAtomic("fuzz"))
+		opts = append(opts, AllowNonAtomic("fuzz", allowUnits...))
 	}
 	outer := s.top()
 	ctx, b := s.det.StartBoundary(s.ctx(), name, opts...)
 	s.stack = append(s.stack, &modelBoundary{
-		handle:  b,
-		ctx:     ctx,
-		name:    name,
-		allowed: allowed,
-		writeTx: map[uint64]struct{}{},
+		handle:     b,
+		ctx:        ctx,
+		name:       name,
+		allowed:    allowed,
+		allowUnits: allowUnits,
+		writeTx:    map[uint64]struct{}{},
 	})
 
 	exp := reportExpectation{}
@@ -246,13 +279,16 @@ func (s *fuzzSession) finishBoundary() {
 	units := b.units()
 	exp := reportExpectation{}
 	switch {
-	case units >= 2 && !b.allowed:
+	case units >= 2 && !b.suppresses(units):
 		recorded := min(b.recorded, s.maxRecorded)
 		exp.violation = &Violation{
 			Boundary:            b.name,
 			WriteUnits:          units,
 			Statements:          make([]StatementRecord, recorded),
 			TruncatedStatements: b.recorded - recorded,
+			// A mark that declined this count must travel with the report;
+			// an unmarked (or unconstrained) boundary carries nothing.
+			AllowedWriteUnits: b.allowUnits,
 		}
 	case units < 2 && b.allowed:
 		// Rot prevention: an allow that suppressed nothing this execution.
@@ -445,6 +481,9 @@ func (s *fuzzSession) verify(exp reportExpectation) {
 		if len(got.Statements) != len(want.Statements) || got.TruncatedStatements != want.TruncatedStatements {
 			s.t.Fatalf("violation %q recorded %d statement(s) (+%d truncated), want %d (+%d)",
 				got.Boundary, len(got.Statements), got.TruncatedStatements, len(want.Statements), want.TruncatedStatements)
+		}
+		if !slices.Equal(got.AllowedWriteUnits, want.AllowedWriteUnits) {
+			s.t.Fatalf("violation %q AllowedWriteUnits = %v, want %v", got.Boundary, got.AllowedWriteUnits, want.AllowedWriteUnits)
 		}
 	}
 	s.seenViolations = len(violations)
