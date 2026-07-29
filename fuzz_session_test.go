@@ -27,6 +27,8 @@ const (
 	opStartBoundary fuzzOp = iota
 	opStartAllowedBoundary
 	opStartExactAllowedBoundary
+	opAllowHere
+	opExactAllowHere
 	opFinishBoundary
 	opExecWrite
 	opExecRead
@@ -70,8 +72,8 @@ var fuzzStmts = map[fuzzOp]fuzzStmt{
 
 var fuzzBoundaryNames = []string{"CreateUser", "SyncOrders", "Job"}
 
-// fuzzExactAllowUnits is the write-unit count opStartExactAllowedBoundary
-// pins its AllowNonAtomic mark to: exactly this many units are suppressed,
+// fuzzExactAllowUnits is the write-unit count opStartExactAllowedBoundary and
+// opExactAllowHere pin their mark to: exactly this many units are suppressed,
 // every other violating count must still be reported.
 var fuzzExactAllowUnits = []int{2}
 
@@ -91,7 +93,9 @@ func FuzzDetectorSession(f *testing.F) {
 	// violation), writes inside one transaction (atomic), a rolled-back
 	// transaction plus a write (a violation), textual transaction control, a
 	// prepared write, an allow pinned to an exact write-unit count (met and
-	// exceeded), nested boundaries and an unbounded write.
+	// exceeded), the same marks made mid-boundary instead (including one that
+	// replaces an option-made mark, and one made with no boundary at all),
+	// nested boundaries and an unbounded write.
 	for _, seed := range [][]byte{
 		{4, byte(opStartBoundary), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartBoundary), byte(opBeginTx), byte(opExecWrite), byte(opExecWrite), byte(opCommitTx), byte(opFinishBoundary)},
@@ -101,6 +105,10 @@ func FuzzDetectorSession(f *testing.F) {
 		{4, byte(opStartAllowedBoundary), byte(opExecRead), byte(opFinishBoundary)},
 		{4, byte(opStartExactAllowedBoundary), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartExactAllowedBoundary), byte(opExecWrite), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
+		{4, byte(opStartBoundary), byte(opExecWrite), byte(opAllowHere), byte(opExecWrite), byte(opFinishBoundary)},
+		{4, byte(opStartBoundary), byte(opExecWrite), byte(opExactAllowHere), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
+		{4, byte(opStartExactAllowedBoundary), byte(opAllowHere), byte(opExecWrite), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
+		{4, byte(opAllowHere), byte(opStartBoundary), byte(opExecWrite), byte(opExecWrite), byte(opFinishBoundary)},
 		{4, byte(opStartBoundary), byte(opStartBoundary), byte(opExecWrite), byte(opFinishBoundary), byte(opExecWrite), byte(opFinishBoundary)},
 		{0, byte(opExecWrite), byte(opQueryWrite), byte(opStartBoundary), byte(opExecCTEWrite), byte(opFinishBoundary)},
 	} {
@@ -225,6 +233,12 @@ func (s *fuzzSession) step(op fuzzOp, nameIdx int) {
 			allowUnits = fuzzExactAllowUnits
 		}
 		s.startBoundary(fuzzBoundaryNames[nameIdx], op != opStartBoundary, allowUnits)
+	case opAllowHere, opExactAllowHere:
+		var allowUnits []int
+		if op == opExactAllowHere {
+			allowUnits = fuzzExactAllowUnits
+		}
+		s.allowHere(allowUnits)
 	case opFinishBoundary:
 		s.finishBoundary()
 	case opBeginTx:
@@ -267,6 +281,20 @@ func (s *fuzzSession) startBoundary(name string, allowed bool, allowUnits []int)
 		exp.nested = &NestedBoundary{Outer: outer.name, Inner: name}
 	}
 	s.verify(exp)
+}
+
+// allowHere marks the innermost live boundary from the middle of the program,
+// as production code does at the site of the extra write. With no boundary in
+// context it must do nothing at all, and it never produces a report by itself:
+// the mark is only evaluated at Finish. The last mark wins, so the model simply
+// overwrites.
+func (s *fuzzSession) allowHere(allowUnits []int) {
+	AllowNonAtomicHere(s.ctx(), "fuzz", allowUnits...)
+	if b := s.top(); b != nil {
+		b.allowed = true
+		b.allowUnits = allowUnits
+	}
+	s.verify(reportExpectation{})
 }
 
 func (s *fuzzSession) finishBoundary() {

@@ -51,6 +51,22 @@ driver), and production monitoring (pluggable `Reporter`s).
   `UnboundedWriteReporter`). Per-execution stale reports are inherently
   noisy in production (write count varies by code path); exact in
   deterministic tests via `RequireNoStaleAllows`.
+- **`AllowNonAtomicHere(ctx, reason, counts...)`** is the same mark made from
+  the site of the extra write instead of at boundary start (the boundary is
+  usually started in middleware, far from the code that explains it). It must
+  stay expression-identical to the option — same counts, same fall-through to
+  the Allowlist, same StaleAllow — differing only in *where* it is declared;
+  the parity is pinned by `TestAllowNonAtomicHereDecidesLikeTheOption`. Last
+  mark wins (it can narrow or widen what the option declared); no boundary in
+  ctx or an already finished boundary = silent no-op, matching "statements
+  with no boundary are ignored". This is why `allowed`/`allowReason`/
+  `allowUnits` live under `b.mu` and are **snapshotted inside the same
+  critical section as the unit count** in `finishBoundary`: setting `finished`
+  is what stops them changing. Deliberately a package function, not
+  `FromContext(ctx) *Boundary` + method: exposing the live `*Boundary` to
+  application code would expose `Finish`, and an early Finish silently drops
+  every later statement (false negative), whereas the function form also needs
+  no nil check at the call site.
 - **Optional exact write-unit counts** narrow either allow mechanism
   (`AllowNonAtomic(reason, 2)` and `Allowlist.Add(name, reason, 2)`; several
   counts for boundaries whose count varies by code path). Both share
