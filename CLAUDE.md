@@ -107,16 +107,47 @@ These prevent double-counting; keep them intact when touching `driver.go`:
   prepared-statement path, which is also wrapped and will record.
 - Do not record on `driver.ErrBadConn` — database/sql retries on a fresh
   conn and the retry records.
-- `wrappedConn.txID` needs no locking (database/sql guarantees single
-  goroutine per driver.Conn); the boundary struct is the shared/locked one.
+- The per-connection transaction state lives in `Session` (`session.go`),
+  which `wrappedConn` embeds — one state machine serves both the driver
+  middleware and native-driver integrations, so the fuzz coverage of the
+  driver path exercises the exported surface too. It needs no locking
+  (database/sql guarantees single goroutine per driver.Conn, and Session
+  documents the same serial-use contract for native callers); the boundary
+  struct is the shared/locked one.
 - Textual `BEGIN`/`COMMIT`/`ROLLBACK` executed as plain statements also
-  update `txID` (best effort); `ROLLBACK TO SAVEPOINT` must not end the tx.
+  update the transaction state (best effort); `ROLLBACK TO SAVEPOINT` must
+  not end the tx.
 - `wrappedStmt` classifies its query once at Prepare and caches the
   `StatementKind`; executions go through `observeKind` with the cached value
   and must never reclassify (statement-caching drivers would re-pay the
   data-modifying-CTE full-text scan per execution). Lock-free by contract:
   the classifier is fixed after `New` and `driver.Stmt` is single-goroutine.
   Classifiers are therefore documented as pure functions of the query text.
+
+## Native-driver observation (`session.go`)
+
+`Session` is the exported observation surface for connections that never go
+through database/sql (pgx native, ORM hooks). Decisions to keep intact:
+
+- **One Session per connection, used serially** — attribution is per
+  connection; mixing connections in one Session merges unrelated
+  transactions into one unit. The contract mirrors driver.Conn's.
+- **`Observe` records submitted statements whether or not they succeed**
+  (same as the driver middleware; only something like database/sql's
+  ErrBadConn retry justifies skipping, and that is the integration's call).
+- **`BeginTx`/`EndTx` exist for transactions that never surface as text**:
+  driver-API transactions and protocol-level implicit ones. The pgx batch is
+  the canonical case — pipelined up to a single Sync, PostgreSQL runs it as
+  ONE implicit transaction, so an integration must bracket a batch with
+  BeginTx/EndTx **only when the connection is idle at batch start** (a batch
+  inside an explicit tx belongs to that tx; bracketing would split the outer
+  unit). Pinned by `TestPgxNativeBatchIsOneImplicitTransaction` /
+  `...BatchInsideTransactionJoinsIt` in e2e, cross-checked against the
+  server log.
+- The reference pgx integration lives in `e2e/pgxtracer.go` (linked from
+  README); it is deliberately e2e-resident so it stays cross-checked, not a
+  published subpackage — promoting it to one is a roadmap candidate if
+  demand shows up.
 
 ## Classification
 

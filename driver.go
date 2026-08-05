@@ -30,7 +30,7 @@ func (w *wrappedDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedConn{det: w.det, conn: conn}, nil
+	return &wrappedConn{det: w.det, conn: conn, session: Session{det: w.det}}, nil
 }
 
 type wrappedConnector struct {
@@ -43,7 +43,7 @@ func (w *wrappedConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &wrappedConn{det: w.det, conn: conn}, nil
+	return &wrappedConn{det: w.det, conn: conn, session: Session{det: w.det}}, nil
 }
 
 func (w *wrappedConnector) Driver() driver.Driver {
@@ -51,12 +51,14 @@ func (w *wrappedConnector) Driver() driver.Driver {
 }
 
 // wrappedConn observes every statement and tracks whether the connection is
-// currently inside a transaction. database/sql guarantees a driver.Conn is
-// used by a single goroutine at a time, so txID needs no locking.
+// currently inside a transaction. The tracking itself lives in Session — the
+// same state machine serves native-driver integrations — and database/sql
+// guarantees a driver.Conn is used by a single goroutine at a time, which is
+// exactly the serial-use contract Session requires.
 type wrappedConn struct {
-	det  *Detector
-	conn driver.Conn
-	txID uint64 // non-zero while inside a transaction
+	det     *Detector
+	conn    driver.Conn
+	session Session
 }
 
 var (
@@ -74,22 +76,7 @@ var (
 // observe records one executed statement, updating textual transaction state
 // (raw "BEGIN"/"COMMIT" executed as statements) as a best effort.
 func (c *wrappedConn) observe(ctx context.Context, query string) {
-	c.observeKind(ctx, query, c.det.classify(query))
-}
-
-// observeKind is observe with the classification already done: the
-// prepared-statement path classifies once at Prepare and reuses the result
-// for every execution.
-func (c *wrappedConn) observeKind(ctx context.Context, query string, kind StatementKind) {
-	switch kind {
-	case KindBegin:
-		if c.txID == 0 {
-			c.txID = c.det.nextTxID()
-		}
-	case KindCommit, KindRollback:
-		c.txID = 0
-	}
-	c.det.record(ctx, query, kind, c.txID)
+	c.session.Observe(ctx, query)
 }
 
 func (c *wrappedConn) Prepare(query string) (driver.Stmt, error) {
@@ -118,7 +105,7 @@ func (c *wrappedConn) Begin() (driver.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.txID = c.det.nextTxID()
+	c.session.BeginTx()
 	return &wrappedTx{conn: c, tx: tx}, nil
 }
 
@@ -128,7 +115,7 @@ func (c *wrappedConn) BeginTx(ctx context.Context, opts driver.TxOptions) (drive
 		if err != nil {
 			return nil, err
 		}
-		c.txID = c.det.nextTxID()
+		c.session.BeginTx()
 		return &wrappedTx{conn: c, tx: tx}, nil
 	}
 	if opts != (driver.TxOptions{}) {
@@ -228,13 +215,13 @@ type wrappedTx struct {
 
 func (t *wrappedTx) Commit() error {
 	err := t.tx.Commit()
-	t.conn.txID = 0
+	t.conn.session.EndTx()
 	return err
 }
 
 func (t *wrappedTx) Rollback() error {
 	err := t.tx.Rollback()
-	t.conn.txID = 0
+	t.conn.session.EndTx()
 	return err
 }
 
@@ -265,7 +252,7 @@ func (s *wrappedStmt) Exec(args []driver.Value) (driver.Result, error) {
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observeKind(context.Background(), s.query, s.kind)
+	s.conn.session.observeKind(context.Background(), s.query, s.kind)
 	return res, err
 }
 
@@ -274,7 +261,7 @@ func (s *wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue)
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observeKind(ctx, s.query, s.kind)
+	s.conn.session.observeKind(ctx, s.query, s.kind)
 	return res, err
 }
 
@@ -294,7 +281,7 @@ func (s *wrappedStmt) Query(args []driver.Value) (driver.Rows, error) {
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observeKind(context.Background(), s.query, s.kind)
+	s.conn.session.observeKind(context.Background(), s.query, s.kind)
 	return rows, err
 }
 
@@ -303,7 +290,7 @@ func (s *wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue
 	if errors.Is(err, driver.ErrBadConn) {
 		return nil, err
 	}
-	s.conn.observeKind(ctx, s.query, s.kind)
+	s.conn.session.observeKind(ctx, s.query, s.kind)
 	return rows, err
 }
 

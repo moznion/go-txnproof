@@ -49,6 +49,25 @@ db, err := sql.Open("pgx-txnproof", dsn)
 
 Any `database/sql` driver works (`pgx`, `lib/pq`, `go-sql-driver/mysql`, `mattn/go-sqlite3`, ...). If you use `sql.OpenDB`, wrap the connector instead with `detector.WrapConnector`.
 
+#### Native drivers (pgx without database/sql)
+
+A connection that never goes through `database/sql` has no driver to wrap. For those, feed statement text to a per-connection `Session` — the same state machine the driver middleware is built on. With pgx, a `QueryTracer` sees every statement including the textual `begin`/`commit`/`rollback` that `Begin()`/`Commit()` execute, so transaction attribution works from the text alone:
+
+```go
+type tracer struct {
+	det      *txnproof.Detector
+	mu       sync.Mutex
+	sessions map[*pgx.Conn]*txnproof.Session
+}
+
+func (t *tracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	t.sessionFor(conn).Observe(ctx, data.SQL) // one Session per connection
+	return ctx
+}
+```
+
+Install it via `pgxpool.Config.ConnConfig.Tracer`, and drop the connection's Session in `pgxpool.Config.BeforeClose`. Two details matter beyond the happy path: a batch (`SendBatch`) is pipelined up to a single Sync, so PostgreSQL runs it as **one implicit transaction** — bracket it with `Session.BeginTx`/`EndTx` when (and only when) the connection is idle at batch start; and a `Session` must be used serially per connection, which pgx already guarantees. The full reference implementation, cross-checked against the server's own log, is [`e2e/pgxtracer.go`](e2e/pgxtracer.go) with its scenarios in [`e2e/e2e_pgx_test.go`](e2e/e2e_pgx_test.go).
+
 ### 2. Mark boundaries
 
 A boundary is the unit that *should* be atomic — typically a use case invocation. Put it in middleware so every code path is covered:
