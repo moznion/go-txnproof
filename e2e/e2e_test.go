@@ -131,13 +131,18 @@ func (h *harness) runScenario(name string, fn func(ctx context.Context, conn *sq
 // clientViolation returns txnproof's violation for the boundary, or nil.
 func (h *harness) clientViolation(label string) *txnproof.Violation {
 	h.t.Helper()
+	return clientViolationFor(h.t, h.reporter, label)
+}
+
+func clientViolationFor(t *testing.T, reporter *txnproof.CollectingReporter, label string) *txnproof.Violation {
+	t.Helper()
 	var found *txnproof.Violation
-	for _, v := range h.reporter.Violations() {
+	for _, v := range reporter.Violations() {
 		if v.Boundary != label {
 			continue
 		}
 		if found != nil {
-			h.t.Fatalf("boundary %q reported more than one violation", label)
+			t.Fatalf("boundary %q reported more than one violation", label)
 		}
 		v := v
 		found = &v
@@ -152,13 +157,18 @@ func (h *harness) clientViolation(label string) *txnproof.Violation {
 // returned Report, which the caller asserts on.
 func (h *harness) serverReport(label string) *crosscheck.Report {
 	h.t.Helper()
+	return serverReportFor(h.t, h.checker, h.logPath, label)
+}
+
+func serverReportFor(t *testing.T, checker *pgcheck.Checker, logPath, label string) *crosscheck.Report {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		f, err := os.Open(h.logPath)
+		f, err := os.Open(logPath)
 		if err != nil {
-			h.t.Fatalf("open server log: %v", err)
+			t.Fatalf("open server log: %v", err)
 		}
-		rep, err := h.checker.VerifyScenario(f, label)
+		rep, err := checker.VerifyScenario(f, label)
 		_ = f.Close()
 
 		var nae *crosscheck.NonAtomicError
@@ -169,7 +179,7 @@ func (h *harness) serverReport(label string) *crosscheck.Report {
 			// The server has not flushed the scenario's lines yet.
 			time.Sleep(50 * time.Millisecond)
 		default:
-			h.t.Fatalf("pgcheck verdict for %q: %v", label, err)
+			t.Fatalf("pgcheck verdict for %q: %v", label, err)
 		}
 	}
 }
