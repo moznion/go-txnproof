@@ -1,6 +1,6 @@
 # Changelog
 
-## [v0.2.1](https://github.com/moznion/go-txnproof/compare/v0.2.0...v0.2.1) - 2026-08-05
+## [v0.3.0](https://github.com/moznion/go-txnproof/compare/v0.2.0...v0.3.0) - 2026-08-05
 
 - Expose Session so native drivers can be observed without database/sql by @moznion in https://github.com/moznion/go-txnproof/pull/15
 
