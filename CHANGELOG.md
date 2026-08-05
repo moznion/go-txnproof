@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.2.1](https://github.com/moznion/go-txnproof/compare/v0.2.0...v0.2.1) - 2026-08-05
+
+- Expose Session so native drivers can be observed without database/sql by @moznion in https://github.com/moznion/go-txnproof/pull/15
+
 ## [v0.2.0](https://github.com/moznion/go-txnproof/compare/v0.1.1...v0.2.0) - 2026-07-29
 
 - Let allows pin the exact write-unit count they cover: supports `txnproof.AllowNonAtomic` and `allowlist.Add` by @moznion in https://github.com/moznion/go-txnproof/pull/12
